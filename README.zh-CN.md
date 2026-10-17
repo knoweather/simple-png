@@ -208,7 +208,6 @@ go get github.com/XC-Zero/simple-png
   `AddRawChunk` 换新字节
 - 若自定义结构体不值当，直接读 `RawChunks()` 原始列表是最简单的路径
 - 并发一节的规则同样适用：`Parse` 回调不要回调同一个 `Png` 实例
-```
 
 
 ---

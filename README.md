@@ -218,7 +218,6 @@ Notes:
   is worth the effort
 - one rule from the concurrency section: the `Parse` callback must not call
   back into the same `Png` instance
-```
 
 
 ---
