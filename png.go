@@ -153,7 +153,11 @@ func (p *Png) ParseChunk(c ChunkParse, notSave ...bool) error {
 		if cur == nil || ChunkName(cur.code[:]) != c.ChunkName() {
 			continue
 		}
-		if err := c.Parse(cur); err != nil {
+		if err := c.Parse(RawChunk{
+			Name: ChunkName(cur.code[:]),
+			Data: cur.data,
+			CRC:  by.Uint32(cur.crc[:]),
+		}); err != nil {
 			return errors.WithStack(err)
 		}
 		// consume the parsed chunk

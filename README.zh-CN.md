@@ -172,25 +172,42 @@ go get github.com/XC-Zero/simple-png
 
 ### 也支持自定义 chunk 解析~
 
+库暂未原生解码的 chunk（如 `sPLT`）会以原始形式保留，任何 4 字节 chunk
+类型都能挂上你自己的结构体：
+
 ```go
 
+    // 实现两个方法即可接入自定义 chunk 类型
     type CustomChunkParse struct {
-	  // 你的结构体
+        Data []byte
     }
 
     func (c *CustomChunkParse) ChunkName() ChunkName {
-      return ChunkName("cust")
+        return ChunkName("cust")
     }
 
-    func (c *CustomChunkParse) Parse(chunk *chunk) error {
-      // 你的自定义解析
-      return nil
+    // Parse 收到原始 chunk（名字 + 数据 + CRC），把内容填进结构体
+    func (c *CustomChunkParse) Parse(chunk RawChunk) error {
+        c.Data = chunk.Data
+        return nil
     }
 
-    p, err := ParsePng(open) // ... 错误处理省略
+    p, err := ParsePng(open)     // ... 错误处理省略
     c := &CustomChunkParse{}
-    err = p.ParseChunk(c)    // 消费该 chunk，之后可用 GetOtherChunkByName 取回
+    err = p.ParseChunk(c)        // 消费匹配的 chunk
+    // 取回：除非调用时传了 notSave，ParseChunk 会把解析器存起来
+    found, err := p.GetOtherChunkByName("cust")
 
+```
+
+说明：
+
+- 同一类型出现多次时，每调用一次 `ParseChunk` 消费一个
+- 回写时，用自定义类型解析过的 chunk 会**逐字节原样**输出（库没有它的
+  序列化器）——要修改自定义 chunk 的载荷，用 `DeleteRawChunk` +
+  `AddRawChunk` 换新字节
+- 若自定义结构体不值当，直接读 `RawChunks()` 原始列表是最简单的路径
+- 并发一节的规则同样适用：`Parse` 回调不要回调同一个 `Png` 实例
 ```
 
 

@@ -115,9 +115,13 @@ func NewITXTChunk(keyword, languageTag, translatedKeyword, text string, compress
 	return ITXTChunk, out, nil
 }
 
+// ChunkParse is the interface of every chunk type the library parses natively
+// and of any custom chunk type a caller provides: implement ChunkName (the
+// 4 byte type code to look up) and Parse (which receives the raw chunk as
+// name + data + crc and fills the receiver's fields).
 type ChunkParse interface {
 	ChunkName() ChunkName
-	Parse(chunk *chunk) error
+	Parse(chunk RawChunk) error
 }
 
 type chunk struct {
@@ -196,17 +200,17 @@ type IHDR struct {
 	InterlaceMethod   uint8
 }
 
-func (c *IHDR) Parse(chunk *chunk) error {
-	if chunk.data == nil || len(chunk.data) < 13 {
+func (c *IHDR) Parse(chunk RawChunk) error {
+	if chunk.Data == nil || len(chunk.Data) < 13 {
 		return errors.New("invalid chunk data")
 	}
-	c.Width = by.Uint32(chunk.data[:4])
-	c.Height = by.Uint32(chunk.data[4:8])
-	c.BitDepth = chunk.data[8]
-	c.ColorType = chunk.data[9]
-	c.CompressionMethod = chunk.data[10]
-	c.FilterMethod = chunk.data[11]
-	c.InterlaceMethod = chunk.data[12]
+	c.Width = by.Uint32(chunk.Data[:4])
+	c.Height = by.Uint32(chunk.Data[4:8])
+	c.BitDepth = chunk.Data[8]
+	c.ColorType = chunk.Data[9]
+	c.CompressionMethod = chunk.Data[10]
+	c.FilterMethod = chunk.Data[11]
+	c.InterlaceMethod = chunk.Data[12]
 	return nil
 }
 
@@ -265,8 +269,8 @@ func (i *IEND) ChunkName() ChunkName {
 	return IENDChunk
 }
 
-func (i *IEND) Parse(chunk *chunk) error {
-	if len(chunk.data) != 0 {
+func (i *IEND) Parse(chunk RawChunk) error {
+	if len(chunk.Data) != 0 {
 		return errors.New("invalid iend chunk data")
 	}
 	return nil
@@ -309,16 +313,16 @@ func (p *PLTE) ChunkName() ChunkName {
 	return PLTEChunk
 }
 
-func (p *PLTE) Parse(chunk *chunk) error {
-	if chunk.data == nil || len(chunk.data)%3 != 0 || len(chunk.data) < 3 {
+func (p *PLTE) Parse(chunk RawChunk) error {
+	if chunk.Data == nil || len(chunk.Data)%3 != 0 || len(chunk.Data) < 3 {
 		return errors.New("invalid plte chunk data")
 	}
-	p.Colors = make([]*PLTEColor, 0, len(chunk.data)/3)
-	for i := 0; i+2 < len(chunk.data); i += 3 {
+	p.Colors = make([]*PLTEColor, 0, len(chunk.Data)/3)
+	for i := 0; i+2 < len(chunk.Data); i += 3 {
 		p.Colors = append(p.Colors, &PLTEColor{
-			Red:   chunk.data[i],
-			Green: chunk.data[i+1],
-			Blue:  chunk.data[i+2],
+			Red:   chunk.Data[i],
+			Green: chunk.Data[i+1],
+			Blue:  chunk.Data[i+2],
 		})
 	}
 
@@ -352,10 +356,10 @@ func (i *IDAT) ChunkName() ChunkName {
 	return IDATChunk
 }
 
-func (i *IDAT) Parse(chunk *chunk) error {
-	i.Length = by.Uint32(chunk.len[:])
-	i.ChunkTypeCode = string(chunk.code[:])
-	i.Data = chunk.data[:]
+func (i *IDAT) Parse(chunk RawChunk) error {
+	i.Length = uint32(len(chunk.Data))
+	i.ChunkTypeCode = string(chunk.Name)
+	i.Data = chunk.Data[:]
 	return nil
 }
 
@@ -402,16 +406,16 @@ func (b *BKGD) ChunkName() ChunkName {
 	return BKGDChunk
 }
 
-func (b *BKGD) Parse(chunk *chunk) error {
-	switch len(chunk.data) {
+func (b *BKGD) Parse(chunk RawChunk) error {
+	switch len(chunk.Data) {
 	case 1: // color type 3: palette index
-		b.Palette = chunk.data[0]
+		b.Palette = chunk.Data[0]
 	case 2: // color types 0 and 4: gray
-		b.Gray = by.Uint16(chunk.data[:2])
+		b.Gray = by.Uint16(chunk.Data[:2])
 	case 6: // color types 2 and 6: rgb
-		b.Red = by.Uint16(chunk.data[0:2])
-		b.Green = by.Uint16(chunk.data[2:4])
-		b.Blue = by.Uint16(chunk.data[4:6])
+		b.Red = by.Uint16(chunk.Data[0:2])
+		b.Green = by.Uint16(chunk.Data[2:4])
+		b.Blue = by.Uint16(chunk.Data[4:6])
 	default:
 		return errors.New("invalid bkgd chunk data")
 	}
@@ -460,18 +464,18 @@ func (c *CHRM) ChunkName() ChunkName {
 	return CHRMChunk
 }
 
-func (c *CHRM) Parse(chunk *chunk) error {
-	if chunk.data == nil || len(chunk.data) < 32 {
+func (c *CHRM) Parse(chunk RawChunk) error {
+	if chunk.Data == nil || len(chunk.Data) < 32 {
 		return errors.New("invalid chrm chunk data")
 	}
-	c.WhiteX = by.Uint32(chunk.data[:4])
-	c.WhiteY = by.Uint32(chunk.data[4:8])
-	c.RedX = by.Uint32(chunk.data[8:12])
-	c.RedY = by.Uint32(chunk.data[12:16])
-	c.GreenX = by.Uint32(chunk.data[16:20])
-	c.GreenY = by.Uint32(chunk.data[20:24])
-	c.BlueX = by.Uint32(chunk.data[24:28])
-	c.BlueY = by.Uint32(chunk.data[28:32])
+	c.WhiteX = by.Uint32(chunk.Data[:4])
+	c.WhiteY = by.Uint32(chunk.Data[4:8])
+	c.RedX = by.Uint32(chunk.Data[8:12])
+	c.RedY = by.Uint32(chunk.Data[12:16])
+	c.GreenX = by.Uint32(chunk.Data[16:20])
+	c.GreenY = by.Uint32(chunk.Data[20:24])
+	c.BlueX = by.Uint32(chunk.Data[24:28])
+	c.BlueY = by.Uint32(chunk.Data[28:32])
 	return nil
 }
 
@@ -501,11 +505,11 @@ func (g *GAMA) ChunkName() ChunkName {
 	return GAMAChunk
 }
 
-func (g *GAMA) Parse(chunk *chunk) error {
-	if chunk.data == nil || len(chunk.data) < 4 {
+func (g *GAMA) Parse(chunk RawChunk) error {
+	if chunk.Data == nil || len(chunk.Data) < 4 {
 		return errors.New("invalid gama chunk data")
 	}
-	g.ImageGamma = by.Uint32(chunk.data[:4])
+	g.ImageGamma = by.Uint32(chunk.Data[:4])
 	return nil
 }
 
@@ -534,14 +538,14 @@ func (h *HIST) ChunkName() ChunkName {
 	return HISTChunk
 }
 
-func (h *HIST) Parse(chunk *chunk) error {
-	if len(chunk.data)%2 != 0 {
+func (h *HIST) Parse(chunk RawChunk) error {
+	if len(chunk.Data)%2 != 0 {
 		return errors.New("invalid hist chunk data")
 	}
-	n := len(chunk.data) / 2
+	n := len(chunk.Data) / 2
 	h.Elements = make([]uint16, 0, n)
 	for i := 0; i < n; i++ {
-		h.Elements = append(h.Elements, by.Uint16(chunk.data[i*2:i*2+2]))
+		h.Elements = append(h.Elements, by.Uint16(chunk.Data[i*2:i*2+2]))
 	}
 	return nil
 }
@@ -582,13 +586,13 @@ func (p *PHYS) ChunkName() ChunkName {
 	return PHYSChunk
 }
 
-func (p *PHYS) Parse(chunk *chunk) error {
-	if chunk.data == nil || len(chunk.data) < 9 {
+func (p *PHYS) Parse(chunk RawChunk) error {
+	if chunk.Data == nil || len(chunk.Data) < 9 {
 		return errors.New("invalid phys chunk data")
 	}
-	p.X = by.Uint32(chunk.data[:4])
-	p.Y = by.Uint32(chunk.data[4:8])
-	p.UnitSpecifier = chunk.data[8]
+	p.X = by.Uint32(chunk.Data[:4])
+	p.Y = by.Uint32(chunk.Data[4:8])
+	p.UnitSpecifier = chunk.Data[8]
 	return nil
 }
 
@@ -626,15 +630,15 @@ func (s *SBIT) ChunkName() ChunkName {
 	return SBITChunk
 }
 
-func (s *SBIT) Parse(chunk *chunk) error {
-	if chunk.data == nil || len(chunk.data) < 1 {
+func (s *SBIT) Parse(chunk RawChunk) error {
+	if chunk.Data == nil || len(chunk.Data) < 1 {
 		return errors.New("invalid sbit chunk data")
 	}
 	for i := 0; i < len(s.OrgData); i++ {
-		if len(chunk.data) <= i {
+		if len(chunk.Data) <= i {
 			s.OrgData[i] = 0
 		} else {
-			s.OrgData[i] = chunk.data[i]
+			s.OrgData[i] = chunk.Data[i]
 		}
 	}
 	return nil
@@ -667,14 +671,14 @@ func (t *TEXT) ChunkName() ChunkName {
 
 const nullSep = string(byte(0x00))
 
-func (t *TEXT) Parse(chunk *chunk) error {
-	sep := bytes.IndexByte(chunk.data, 0x00)
+func (t *TEXT) Parse(chunk RawChunk) error {
+	sep := bytes.IndexByte(chunk.Data, 0x00)
 	if sep < 1 || sep > 79 {
 		return errors.New("invalid text")
 	}
-	t.Keyword = string(chunk.data[:sep])
+	t.Keyword = string(chunk.Data[:sep])
 	t.Separator = nullSep
-	t.Text = string(chunk.data[sep+1:])
+	t.Text = string(chunk.Data[sep+1:])
 
 	return nil
 }
@@ -712,16 +716,16 @@ func (t *TIME) ChunkName() ChunkName {
 	return TIMEChunk
 }
 
-func (t *TIME) Parse(chunk *chunk) error {
-	if len(chunk.data) < 7 {
+func (t *TIME) Parse(chunk RawChunk) error {
+	if len(chunk.Data) < 7 {
 		return errors.New("invalid time chunk data")
 	}
-	t.Year = by.Uint16(chunk.data[:2])
-	t.Month = chunk.data[2]
-	t.Day = chunk.data[3]
-	t.Hour = chunk.data[4]
-	t.Minute = chunk.data[5]
-	t.Second = chunk.data[6]
+	t.Year = by.Uint16(chunk.Data[:2])
+	t.Month = chunk.Data[2]
+	t.Day = chunk.Data[3]
+	t.Hour = chunk.Data[4]
+	t.Minute = chunk.Data[5]
+	t.Second = chunk.Data[6]
 	return nil
 }
 
@@ -761,17 +765,17 @@ func (i *ITXT) ChunkName() ChunkName {
 	return ITXTChunk
 }
 
-func (i *ITXT) Parse(chunk *chunk) error {
-	sep := bytes.IndexByte(chunk.data, 0x00)
+func (i *ITXT) Parse(chunk RawChunk) error {
+	sep := bytes.IndexByte(chunk.Data, 0x00)
 	if sep < 1 || sep > 79 {
 		return errors.New("invalid itxt chunk data")
 	}
-	if len(chunk.data) < sep+3 {
+	if len(chunk.Data) < sep+3 {
 		return errors.New("invalid itxt chunk data")
 	}
-	i.Keyword = string(chunk.data[:sep])
-	i.Data = chunk.data[:]
-	rest := chunk.data[sep+1:]
+	i.Keyword = string(chunk.Data[:sep])
+	i.Data = chunk.Data[:]
+	rest := chunk.Data[sep+1:]
 	if len(rest) < 3 {
 		return errors.New("invalid itxt chunk data")
 	}
@@ -863,20 +867,20 @@ func (T *TRNS) ChunkName() ChunkName {
 // from a gray level (or rgb color) without knowing the color type from
 // IHDR; IDATsToColor re-interprets TRNS.Data with the actual color type
 // when decoding.
-func (T *TRNS) Parse(chunk *chunk) error {
-	if chunk.data == nil || len(chunk.data) == 0 || len(chunk.data) > 256 {
+func (T *TRNS) Parse(chunk RawChunk) error {
+	if chunk.Data == nil || len(chunk.Data) == 0 || len(chunk.Data) > 256 {
 		return errors.New("invalid trns chunk data")
 	}
-	T.Data = chunk.data[:]
-	switch len(chunk.data) {
+	T.Data = chunk.Data[:]
+	switch len(chunk.Data) {
 	case 2: // color types 0 and 4: gray level
-		T.Gray = by.Uint16(chunk.data[:2])
+		T.Gray = by.Uint16(chunk.Data[:2])
 	case 6: // color type 2: rgb color
-		T.Red = by.Uint16(chunk.data[0:2])
-		T.Green = by.Uint16(chunk.data[2:4])
-		T.Blue = by.Uint16(chunk.data[4:6])
+		T.Red = by.Uint16(chunk.Data[0:2])
+		T.Green = by.Uint16(chunk.Data[2:4])
+		T.Blue = by.Uint16(chunk.Data[4:6])
 	default: // color type 3: palette alpha values
-		T.PaletteAlphas = chunk.data[:]
+		T.PaletteAlphas = chunk.Data[:]
 	}
 	return nil
 }
@@ -911,18 +915,18 @@ func (z *ZTXT) ChunkName() ChunkName {
 	return ZTXTChunk
 }
 
-func (z *ZTXT) Parse(chunk *chunk) error {
-	sep := bytes.IndexByte(chunk.data, 0x00)
+func (z *ZTXT) Parse(chunk RawChunk) error {
+	sep := bytes.IndexByte(chunk.Data, 0x00)
 	if sep < 1 || sep > 79 {
 		return errors.New("invalid text")
 	}
 	// keyword + null + compression method + compressed text
-	if len(chunk.data) < sep+1+1 {
+	if len(chunk.Data) < sep+1+1 {
 		return errors.New("invalid ztxt chunk data")
 	}
-	z.Keyword = string(chunk.data[:sep])
+	z.Keyword = string(chunk.Data[:sep])
 	z.Separator = nullSep
-	rest := chunk.data[sep+1:]
+	rest := chunk.Data[sep+1:]
 	z.CompressionMethod = rest[0]
 	if z.CompressionMethod != 0 {
 		return errors.Errorf("unsupported ztxt compression method %d", z.CompressionMethod)
@@ -967,11 +971,11 @@ func (s *SRGB) ChunkName() ChunkName {
 	return SRGBChunk
 }
 
-func (s *SRGB) Parse(chunk *chunk) error {
-	if chunk.data == nil || len(chunk.data) != 1 {
+func (s *SRGB) Parse(chunk RawChunk) error {
+	if chunk.Data == nil || len(chunk.Data) != 1 {
 		return errors.New("invalid srgb chunk data")
 	}
-	s.RenderingIntent = chunk.data[0]
+	s.RenderingIntent = chunk.Data[0]
 	return nil
 }
 
@@ -1009,16 +1013,16 @@ func (i *ICCP) ChunkName() ChunkName {
 	return ICCPChunk
 }
 
-func (i *ICCP) Parse(chunk *chunk) error {
-	sep := bytes.IndexByte(chunk.data, 0x00)
+func (i *ICCP) Parse(chunk RawChunk) error {
+	sep := bytes.IndexByte(chunk.Data, 0x00)
 	if sep < 1 || sep > 79 {
 		return errors.New("invalid iccp profile name")
 	}
-	if len(chunk.data) < sep+2 {
+	if len(chunk.Data) < sep+2 {
 		return errors.New("invalid iccp chunk data")
 	}
-	i.Name = string(chunk.data[:sep])
-	rest := chunk.data[sep+1:]
+	i.Name = string(chunk.Data[:sep])
+	rest := chunk.Data[sep+1:]
 	i.CompressionMethod = rest[0]
 	if i.CompressionMethod != 0 {
 		return errors.Errorf("unsupported iccp compression method %d", i.CompressionMethod)
@@ -1084,8 +1088,8 @@ func (e *EXIF) ChunkName() ChunkName {
 	return EXIFChunk
 }
 
-func (e *EXIF) Parse(chunk *chunk) error {
-	e.Data = append(e.Data, chunk.data...)
+func (e *EXIF) Parse(chunk RawChunk) error {
+	e.Data = append(e.Data, chunk.Data...)
 	return nil
 }
 

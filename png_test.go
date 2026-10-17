@@ -187,8 +187,8 @@ func (c *CustomChunkParse) ChunkName() ChunkName {
 	return ChunkName("sPLT")
 }
 
-func (c *CustomChunkParse) Parse(chunk *chunk) error {
-	c.Data = chunk.data[:]
+func (c *CustomChunkParse) Parse(chunk RawChunk) error {
+	c.Data = chunk.Data[:]
 	return nil
 }
 
@@ -582,7 +582,7 @@ func TestTIME(t *testing.T) {
 	var data []byte
 	data = append(data, []byte{0x07, 0xDB}...) // 2011
 	data = append(data, 12, 25, 18, 30, 59)
-	c := &chunk{data: data}
+	c := RawChunk{Data: data}
 	tm := &TIME{}
 	if err := tm.Parse(c); err != nil {
 		t.Fatal(err)
@@ -595,7 +595,7 @@ func TestTIME(t *testing.T) {
 	}
 
 	// short data must not panic
-	if err := tm.Parse(&chunk{data: data[:3]}); err == nil {
+	if err := tm.Parse(RawChunk{Data: data[:3]}); err == nil {
 		t.Fatal("expected an error for short time data")
 	}
 }

@@ -18,8 +18,8 @@ type stressChunk struct {
 
 func (s *stressChunk) ChunkName() ChunkName { return "zzZt" }
 
-func (s *stressChunk) Parse(c *chunk) error {
-	s.data = c.data
+func (s *stressChunk) Parse(c RawChunk) error {
+	s.data = c.Data
 	return nil
 }
 

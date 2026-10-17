@@ -179,25 +179,45 @@ and import it:
 
 ### You also can custom chunk parse~
 
+Every chunk the library does not decode natively (e.g. `sPLT`) stays in raw
+form and any 4 byte chunk type can be hooked with your own struct:
+
 ```go
 
+    // implement two methods to hook your own chunk type
     type CustomChunkParse struct {
-	  // your struct
+        Data []byte
     }
 
     func (c *CustomChunkParse) ChunkName() ChunkName {
-      return ChunkName("cust")
+        return ChunkName("cust")
     }
 
-    func (c *CustomChunkParse) Parse(chunk *chunk) error {
-      // your custom parse
-      return nil
+    // Parse receives the raw chunk (name + data + crc) and fills the struct
+    func (c *CustomChunkParse) Parse(chunk RawChunk) error {
+        c.Data = chunk.Data
+        return nil
     }
 
-    p, err := ParsePng(open) // ... error handling
+    p, err := ParsePng(open)     // ... error handling
     c := &CustomChunkParse{}
-    err = p.ParseChunk(c)    // consumed, retrievable via GetOtherChunkByName
+    err = p.ParseChunk(c)        // consumes the matching chunk
+    // retrieval: ParseChunk stores the parser unless notSave was set
+    found, err := p.GetOtherChunkByName("cust")
 
+```
+
+Notes:
+
+- several occurrences of a chunk type consume several parsers, one
+  `ParseChunk` call each
+- while writing back, chunks parsed with a custom type are copied **byte for
+  byte** (the library has no serializer for them) — to change the payload of
+  a custom chunk, use `DeleteRawChunk` + `AddRawChunk` with new bytes
+- the raw `RawChunks()` list is the simplest read path when no custom struct
+  is worth the effort
+- one rule from the concurrency section: the `Parse` callback must not call
+  back into the same `Png` instance
 ```
 
 
