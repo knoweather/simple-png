@@ -1,10 +1,14 @@
 package simple_png
 
 import (
+	"bytes"
+	"compress/zlib"
 	"encoding/binary"
-	"errors"
-	"strings"
+	"hash/crc32"
+	"io"
 	"time"
+
+	"github.com/pkg/errors"
 )
 
 // png format  https://www.w3.org/TR/PNG-Chunks.html
@@ -26,13 +30,86 @@ const (
 	TRNSChunk ChunkName = "tRNS"
 	PHYSChunk ChunkName = "pHYs"
 	TEXTChunk ChunkName = "tEXt"
-	ZTXTChunk ChunkName = "zTXT"
+	ZTXTChunk ChunkName = "zTXt"
+	ITXTChunk ChunkName = "iTXt"
 	TIMEChunk ChunkName = "tIME"
 )
 
-// ISO_3309_CRC x32+x26+x23+x22+x16+x12+x11+x10+x8+x7+x5+x4+x2+x+1
-// TODO implement crc
-var ISO_3309_CRC = []uint{1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1}
+// ISO_3309_CRC32 computes the 32-bit CRC defined in ISO 3309 (ITU-T V.42) and
+// required by the PNG specification for every chunk. It is the same polynomial
+// as IEEE 802.3 / zlib's crc32: x32+x26+x23+x22+x16+x12+x11+x10+x8+x7+x5+x4+x2+x+1
+func ISO_3309_CRC32(b []byte) uint32 {
+	return crc32.ChecksumIEEE(b)
+}
+
+// zlibCompress compresses data as a zlib stream with the default compression
+// level, as required by compression method 0.
+func zlibCompress(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	zw := zlib.NewWriter(&buf)
+	if _, err := zw.Write(data); err != nil {
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// zlibDecompress decompresses a zlib stream.
+func zlibDecompress(data []byte) ([]byte, error) {
+	zr, err := zlib.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	plain, err := io.ReadAll(zr)
+	if err != nil {
+		return nil, err
+	}
+	if err = zr.Close(); err != nil {
+		return nil, err
+	}
+	return plain, nil
+}
+
+// NewITXTChunk builds the data area of a new iTXt chunk, e.g. for embedding
+// XMP metadata (keyword "XML:com.adobe.xmp") into an already parsed file
+// through AddRawChunk. Its result is meant to be used as the args of
+// AddRawChunk:
+//
+//	name, data, err := NewITXTChunk("XML:com.adobe.xmp", "", "", xmp, true)
+//	p.AddRawChunk(name, data)
+//
+// The keyword must be 1-79 bytes long and none of the values may contain a
+// null byte.
+func NewITXTChunk(keyword, languageTag, translatedKeyword, text string, compress bool) (ChunkName, []byte, error) {
+	if separator := bytes.IndexByte([]byte(keyword), 0x00); len(keyword) < 1 || len(keyword) > 79 || separator >= 0 {
+		return "", nil, errors.New("invalid itxt keyword: 1-79 bytes without null")
+	}
+	for _, s := range []string{languageTag, translatedKeyword, text} {
+		if bytes.IndexByte([]byte(s), 0x00) >= 0 {
+			return "", nil, errors.New("invalid itxt chunk value: contains null byte")
+		}
+	}
+	var flag byte
+	var textData = []byte(text)
+	if compress {
+		flag = 1
+		var err error
+		if textData, err = zlibCompress(textData); err != nil {
+			return "", nil, errors.WithStack(err)
+		}
+	}
+	out := make([]byte, 0, len(keyword)+len(languageTag)+len(translatedKeyword)+len(textData)+7)
+	out = append(out, keyword...)
+	out = append(out, 0x00, flag, 0x00, 0x00)
+	out = append(out, languageTag...)
+	out = append(out, 0x00)
+	out = append(out, translatedKeyword...)
+	out = append(out, 0x00)
+	out = append(out, textData...)
+	return ITXTChunk, out, nil
+}
 
 type ChunkParse interface {
 	ChunkName() ChunkName
@@ -44,6 +121,19 @@ type chunk struct {
 	code [4]byte
 	data []byte
 	crc  [4]byte
+}
+
+// checkCRC verifies the stored CRC (over the chunk type code and data) as
+// required by the PNG specification.
+func (c *chunk) checkCRC() error {
+	buf := make([]byte, 0, len(c.code)+len(c.data))
+	buf = append(buf, c.code[:]...)
+	buf = append(buf, c.data...)
+	want := by.Uint32(c.crc[:])
+	if got := ISO_3309_CRC32(buf); got != want {
+		return errors.Errorf("chunk %q crc mismatch: stored %08x, computed %08x", string(c.code[:]), want, got)
+	}
+	return nil
 }
 
 /*
@@ -120,6 +210,42 @@ func (c *IHDR) ChunkName() ChunkName {
 	return IHDRChunk
 }
 
+// Validate checks the IHDR fields against the allowed combinations defined
+// by the PNG specification.
+func (c *IHDR) Validate() error {
+	if c.Width == 0 || c.Height == 0 {
+		return errors.New("invalid image size")
+	}
+	if c.CompressionMethod != 0 {
+		return errors.Errorf("unsupported compression method %d", c.CompressionMethod)
+	}
+	if c.FilterMethod != 0 {
+		return errors.Errorf("unsupported filter method %d", c.FilterMethod)
+	}
+	if c.InterlaceMethod > 1 {
+		return errors.Errorf("invalid interlace method %d", c.InterlaceMethod)
+	}
+	var depths []uint8
+	switch c.ColorType {
+	case 0:
+		depths = []uint8{1, 2, 4, 8, 16}
+	case 2, 6:
+		depths = []uint8{8, 16}
+	case 3:
+		depths = []uint8{1, 2, 4, 8}
+	case 4:
+		depths = []uint8{8, 16}
+	default:
+		return errors.Errorf("invalid color type %d", c.ColorType)
+	}
+	for _, d := range depths {
+		if c.BitDepth == d {
+			return nil
+		}
+	}
+	return errors.Errorf("invalid bit depth %d for color type %d", c.BitDepth, c.ColorType)
+}
+
 /*
 
 --------------------------------------------------------------------------------------
@@ -129,11 +255,17 @@ func (c *IHDR) ChunkName() ChunkName {
 // IEND
 // The IEND chunk must appear LAST. It marks the end of the PNG datastream. The chunk's data field is empty.
 type IEND struct {
-	IDAT
 }
 
 func (i *IEND) ChunkName() ChunkName {
 	return IENDChunk
+}
+
+func (i *IEND) Parse(chunk *chunk) error {
+	if len(chunk.data) != 0 {
+		return errors.New("invalid iend chunk data")
+	}
+	return nil
 }
 
 /*
@@ -177,12 +309,13 @@ func (p *PLTE) Parse(chunk *chunk) error {
 	if chunk.data == nil || len(chunk.data)%3 != 0 || len(chunk.data) < 3 {
 		return errors.New("invalid plte chunk data")
 	}
-	for i := 0; i < len(chunk.data)-3; i += 3 {
-		var pc = &PLTEColor{}
-		pc.Red = chunk.data[i]
-		pc.Green = chunk.data[i+1]
-		pc.Blue = chunk.data[i+2]
-		p.Colors = append(p.Colors, pc)
+	p.Colors = make([]*PLTEColor, 0, len(chunk.data)/3)
+	for i := 0; i+2 < len(chunk.data); i += 3 {
+		p.Colors = append(p.Colors, &PLTEColor{
+			Red:   chunk.data[i],
+			Green: chunk.data[i+1],
+			Blue:  chunk.data[i+2],
+		})
 	}
 
 	return nil
@@ -251,11 +384,14 @@ func (i *IDAT) Parse(chunk *chunk) error {
 //
 // See Recommendations for Decoders: Background color.
 type BKGD struct {
+	// For color type 3 (indexed color): the palette index of the background color.
 	Palette uint8
-	Gray    uint16
-	Red     uint16
-	Green   uint16
-	Blue    uint16
+	// For color types 0 and 4 (grayscale): the gray level of the background color.
+	Gray uint16
+	// For color types 2 and 6 (truecolor): the rgb color of the background.
+	Red   uint16
+	Green uint16
+	Blue  uint16
 }
 
 func (b *BKGD) ChunkName() ChunkName {
@@ -263,14 +399,18 @@ func (b *BKGD) ChunkName() ChunkName {
 }
 
 func (b *BKGD) Parse(chunk *chunk) error {
-	if chunk.data == nil || len(chunk.data) < 9 {
+	switch len(chunk.data) {
+	case 1: // color type 3: palette index
+		b.Palette = chunk.data[0]
+	case 2: // color types 0 and 4: gray
+		b.Gray = by.Uint16(chunk.data[:2])
+	case 6: // color types 2 and 6: rgb
+		b.Red = by.Uint16(chunk.data[0:2])
+		b.Green = by.Uint16(chunk.data[2:4])
+		b.Blue = by.Uint16(chunk.data[4:6])
+	default:
 		return errors.New("invalid bkgd chunk data")
 	}
-	b.Palette = chunk.data[0]
-	b.Gray = by.Uint16(chunk.data[1:3])
-	b.Red = by.Uint16(chunk.data[3:5])
-	b.Green = by.Uint16(chunk.data[5:7])
-	b.Blue = by.Uint16(chunk.data[7:9])
 	return nil
 }
 
@@ -391,14 +531,13 @@ func (h *HIST) ChunkName() ChunkName {
 }
 
 func (h *HIST) Parse(chunk *chunk) error {
-	if chunk.data == nil || len(chunk.data)%2 != 0 {
+	if len(chunk.data)%2 != 0 {
 		return errors.New("invalid hist chunk data")
 	}
-	if len(chunk.data) == 0 {
-		return nil
-	}
-	for i := 0; i < len(h.Elements)-2; i += 2 {
-		h.Elements = append(h.Elements, by.Uint16(chunk.data[i:i+2]))
+	n := len(chunk.data) / 2
+	h.Elements = make([]uint16, 0, n)
+	for i := 0; i < n; i++ {
+		h.Elements = append(h.Elements, by.Uint16(chunk.data[i*2:i*2+2]))
 	}
 	return nil
 }
@@ -525,14 +664,13 @@ func (t *TEXT) ChunkName() ChunkName {
 const nullSep = string(byte(0x00))
 
 func (t *TEXT) Parse(chunk *chunk) error {
-	str := strings.TrimSpace(string(chunk.data[:]))
-	strs := strings.Split(str, nullSep)
-	if len(strs) != 2 {
+	sep := bytes.IndexByte(chunk.data, 0x00)
+	if sep < 1 || sep > 79 {
 		return errors.New("invalid text")
 	}
-	t.Keyword = strs[0]
-	t.Separator = " "
-	t.Text = strs[1]
+	t.Keyword = string(chunk.data[:sep])
+	t.Separator = nullSep
+	t.Text = string(chunk.data[sep+1:])
 
 	return nil
 }
@@ -571,6 +709,9 @@ func (t *TIME) ChunkName() ChunkName {
 }
 
 func (t *TIME) Parse(chunk *chunk) error {
+	if len(chunk.data) < 7 {
+		return errors.New("invalid time chunk data")
+	}
 	t.Year = by.Uint16(chunk.data[:2])
 	t.Month = chunk.data[2]
 	t.Day = chunk.data[3]
@@ -584,6 +725,84 @@ func (t *TIME) ToTime() time.Time {
 	return time.Date(int(t.Year), time.Month(t.Month), int(t.Day), int(t.Hour), int(t.Minute), int(t.Second), 0, time.UTC)
 }
 
+// ITXT
+//
+// The iTXt chunk contains textual data just like tEXt and zTXt, but the text
+// is UTF-8 encoded and both the translated keyword and the text itself can be
+// compressed. XMP metadata in png files is stored as an iTXt chunk with the
+// keyword "XML:com.adobe.xmp". The chunk layout is:
+//
+//	Keyword:                  1-79 bytes (character string)
+//	Null separator:           1 byte
+//	Compression flag:         1 byte (0: uncompressed, 1: compressed)
+//	Compression method:       1 byte (0: zlib)
+//	Null separator:           1 byte
+//	Language tag (LCID):      n bytes of ASCII, implicit "x-default" if empty
+//	Null separator:           1 byte
+//	Translated keyword:       n bytes of UTF-8
+//	Null separator:           1 byte
+//	Text:                     n bytes of UTF-8 (optionally zlib compressed)
+type ITXT struct {
+	Keyword           string
+	CompressionFlag   uint8
+	CompressionMethod uint8
+	LanguageTag       string
+	TranslatedKeyword string
+	Text              string
+	// Data keeps the raw chunk payload.
+	Data []byte
+}
+
+func (i *ITXT) ChunkName() ChunkName {
+	return ITXTChunk
+}
+
+func (i *ITXT) Parse(chunk *chunk) error {
+	sep := bytes.IndexByte(chunk.data, 0x00)
+	if sep < 1 || sep > 79 {
+		return errors.New("invalid itxt chunk data")
+	}
+	if len(chunk.data) < sep+3 {
+		return errors.New("invalid itxt chunk data")
+	}
+	i.Keyword = string(chunk.data[:sep])
+	i.Data = chunk.data[:]
+	rest := chunk.data[sep+1:]
+	if len(rest) < 3 {
+		return errors.New("invalid itxt chunk data")
+	}
+	i.CompressionFlag = rest[0]
+	i.CompressionMethod = rest[1]
+	rest = rest[2:]
+	if i.CompressionFlag > 1 {
+		return errors.Errorf("invalid itxt compression flag %d", i.CompressionFlag)
+	}
+	if i.CompressionFlag == 1 && i.CompressionMethod != 0 {
+		return errors.Errorf("unsupported itxt compression method %d", i.CompressionMethod)
+	}
+	// a null separator follows the compression method, then language tag,
+	// translated keyword and text are null delimited; the text itself
+	// extends to the end of the chunk
+	if rest[0] != 0x00 {
+		return errors.New("invalid itxt chunk data")
+	}
+	parts := bytes.SplitN(rest[1:], []byte{0x00}, 3)
+	if len(parts) != 3 {
+		return errors.New("invalid itxt chunk data")
+	}
+	i.LanguageTag = string(parts[0])
+	i.TranslatedKeyword = string(parts[1])
+	text := parts[2]
+	if i.CompressionFlag == 1 {
+		var err error
+		if text, err = zlibDecompress(text); err != nil {
+			return errors.WithStack(err)
+		}
+	}
+	i.Text = string(text)
+	return nil
+}
+
 /*
 
 --------------------------------------------------------------------------------------
@@ -591,7 +810,6 @@ func (t *TIME) ToTime() time.Time {
 */
 
 // TRNS
-// TODO !
 // The tRNS chunk specifies that the image uses simple transparency: either alpha values associated with palette entries (for indexed-color images) or a single transparent color (for grayscale and truecolor images). Although simple transparency is not as elegant as the full alpha channel, it requires less storage space and is sufficient for many common cases.
 // For color type 3 (indexed color), the tRNS chunk contains a series of one-byte alpha values, corresponding to entries in the PLTE chunk:
 //
@@ -618,15 +836,45 @@ func (t *TIME) ToTime() time.Time {
 //
 // When present, the tRNS chunk must precede the first IDAT chunk, and must follow the PLTE chunk, if any.
 type TRNS struct {
+	// For color type 3 (indexed color): alpha values for the first len(PaletteAlphas) palette entries.
+	PaletteAlphas []uint8
+	// For color types 0 and 4 (grayscale): the gray level to be treated as transparent.
+	Gray uint16
+	// For color type 2 (truecolor): the rgb color to be treated as transparent.
+	Red   uint16
+	Green uint16
+	Blue  uint16
+	// Data keeps the raw chunk payload, see TRNS.Data usage in IDATsToColor.
+	Data []byte
 }
 
 func (T *TRNS) ChunkName() ChunkName {
 	return TRNSChunk
 }
 
+// Parse fills the fields of TRNS based on the length of the chunk data:
+// two bytes are a gray level and six bytes are an rgb color, any other
+// length is a list of palette alpha values. Note that a tRNS chunk for a
+// palette image with exactly two (or six) entries is indistinguishable
+// from a gray level (or rgb color) without knowing the color type from
+// IHDR; IDATsToColor re-interprets TRNS.Data with the actual color type
+// when decoding.
 func (T *TRNS) Parse(chunk *chunk) error {
-	//TODO implement me
-	panic("implement me")
+	if chunk.data == nil || len(chunk.data) == 0 || len(chunk.data) > 256 {
+		return errors.New("invalid trns chunk data")
+	}
+	T.Data = chunk.data[:]
+	switch len(chunk.data) {
+	case 2: // color types 0 and 4: gray level
+		T.Gray = by.Uint16(chunk.data[:2])
+	case 6: // color type 2: rgb color
+		T.Red = by.Uint16(chunk.data[0:2])
+		T.Green = by.Uint16(chunk.data[2:4])
+		T.Blue = by.Uint16(chunk.data[4:6])
+	default: // color type 3: palette alpha values
+		T.PaletteAlphas = chunk.data[:]
+	}
+	return nil
 }
 
 /*
@@ -660,14 +908,25 @@ func (z *ZTXT) ChunkName() ChunkName {
 }
 
 func (z *ZTXT) Parse(chunk *chunk) error {
-	str := strings.TrimSpace(string(chunk.data[:]))
-	strs := strings.Split(str, nullSep)
-	if len(strs) != 2 {
+	sep := bytes.IndexByte(chunk.data, 0x00)
+	if sep < 1 || sep > 79 {
 		return errors.New("invalid text")
 	}
-	z.Keyword = strs[0]
-	z.Separator = " "
-	z.CompressionMethod = strs[1][0]
-	z.Text = strs[1][1:]
+	// keyword + null + compression method + compressed text
+	if len(chunk.data) < sep+1+1 {
+		return errors.New("invalid ztxt chunk data")
+	}
+	z.Keyword = string(chunk.data[:sep])
+	z.Separator = nullSep
+	rest := chunk.data[sep+1:]
+	z.CompressionMethod = rest[0]
+	if z.CompressionMethod != 0 {
+		return errors.Errorf("unsupported ztxt compression method %d", z.CompressionMethod)
+	}
+	text, err := zlibDecompress(rest[1:])
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	z.Text = string(text)
 	return nil
 }
