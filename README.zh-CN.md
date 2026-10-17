@@ -1,0 +1,237 @@
+# simple-png
+
+[English](./README.md) | **简体中文**
+
+一个在 chunk 层面工作的纯 Go PNG 库：解析、检查、修改并回写 PNG 数据流，
+未被触碰的部分回写时保持**逐字节一致**——同时提供带滤波/压缩控制的完整图像编码器。
+
+- 把像素解码为标准 `image.Image` 类型（`*image.Gray`、`*image.Gray16`、
+  `*image.NRGBA`、`*image.NRGBA64`、`*image.RGBA`、`*image.RGBA64`、
+  `*image.Paletted`），支持 Adam7 交错与 tRNS 透明，大图解码快于标准库
+- 结构化解析：IHDR、PLTE、tEXt / zTXt / iTXt（如 XMP）、tIME、pHYs、
+  tRNS、bKGD、hIST、sBIT、cHRM、gAMA，以及 **sRGB、iCCP、eXIf**（IFD 条目视图）
+- 库暂未结构化的 chunk（如 sPLT）以原始形式保留、随时可取，任何自定义
+  chunk 类型都可以用几行代码接入解析
+- 回写：解析过程中未被修改的 chunk 原样复制，修改过的 chunk 重新序列化
+  （zTXt/iCCP 未改载荷时保持压缩后的逐字节一致），所有 CRC 重新计算
+- 编码标准库图像：五滤波自适应启发式、可选 Adam7 交错、任意 zlib 等级、
+  自由注入附加 chunk（如手工注入未压缩 XMP）
+
+[PNG (Portable Network Graphics) 规范](https://www.w3.org/TR/PNG-Chunks.html)
+
+## 安装
+
+```
+go get github.com/XC-Zero/simple-png
+```
+
+然后导入：
+
+```go
+
+	import "github.com/XC-Zero/simple-png"
+
+```
+
+## 解析与解码
+
+```go
+
+	open, err := os.Open("./png-format.png")
+	if err != nil {
+		panic(err)
+	}
+	// 每个 chunk 的 CRC-32 校验是可选的，默认关闭，第二个参数传 true 开启
+	p, err := ParsePng(open)
+	if err != nil {
+		panic(err)
+	}
+	// 打印 png 图像数据
+	log.Println(*p.IDATs[0])
+	// 打印 png 附加文本
+	log.Println(*p.TEXTs[0])
+
+	// 解码图像（idat -> 反滤波像素 -> 标准 image.Image）
+	// 支持 Adam7 交错的 png
+	img, err := p.IDATsToColor()
+	if err != nil {
+		panic(err)
+	}
+	log.Println(img.Bounds(), img.ColorModel())
+
+	// 元数据：tEXt / zTXt / iTXt（如 XMP）/ tIME / pHYs / tRNS / bKGD ...
+	for _, x := range p.ITXTs {
+		if x.Keyword == "XML:com.adobe.xmp" {
+			log.Println("XMP:", x.Text)
+		}
+	}
+
+	// 结构体支持的 chunk：sRGB 渲染意图、iCCP 配置文件、eXIf IFD
+	if p.SRGB != nil {
+		log.Println("sRGB rendering intent:", p.SRGB.RenderingIntent)
+	}
+	if p.ICCP != nil {
+		log.Println("iCCP profile:", p.ICCP.Name, len(p.ICCP.Profile), "bytes")
+	}
+	if p.EXIF != nil {
+		// IFD0 + Exif/GPS 子 IFD 的扁平只读视图
+		entries, err := p.EXIF.Entries()
+		if err != nil {
+			panic(err)
+		}
+		for _, e := range entries {
+			log.Printf("exif entry tag %#x type %d count %d", e.Tag, e.Type, e.Count)
+		}
+	}
+
+	// 库暂未结构化的 chunk（如 sPLT）以原始形式返回
+	for _, rc := range p.RawChunks() {
+		log.Println(rc.Name, len(rc.Data))
+	}
+```
+
+
+### EDIT：修改元数据并回写 png
+
+```go
+
+	open, err := os.Open("./png-format.png")
+	if err != nil {
+		panic(err)
+	}
+	p, err := ParsePng(open)
+	if err != nil {
+		panic(err)
+	}
+
+	// 编辑通过解析后的结构体完成，例如把 XMP 块以 iTXt 形式追加
+	//（必须插在第一个 IDAT 之前）
+	name, payload, err := NewITXTChunk("XML:com.adobe.xmp", "", "", xmpString, true)
+	if err != nil {
+		panic(err)
+	}
+	if err = p.AddRawChunk(name, payload); err != nil {
+		panic(err)
+	}
+	// 删除不再需要的 chunk
+	p.DeleteRawChunk("eXIf")
+	// 更新 tIME
+	p.TIME.Year = 2026
+
+	// 回写：未触碰的 chunk 逐字节复制，修改过的重新序列化，
+	// 所有 chunk 的 CRC 重新计算
+	var buf bytes.Buffer
+	if _, err = p.WriteTo(&buf); err != nil {
+		panic(err)
+	}
+	_ = buf.Bytes()
+```
+
+
+### ENCODE：从标准库图像生成 png 流
+
+```go
+
+	// 默认设置：自适应滤波启发式 + zlib 默认压缩等级
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	var buf bytes.Buffer
+	if _, err = simple_png.Encode(img, &buf); err != nil {
+		panic(err)
+	}
+
+	// 完全可控：zlib 等级（CompressionNone/1..9）、滤波策略、IDAT 分块
+	// 大小、Adam7 交错，以及写在第一个 IDAT 之前的附加 chunk
+	enc := &simple_png.Encoder{
+		CompressionLevel: 9,
+		FilterStrategy:   simple_png.FilterHeuristic,
+		ChunkSize:        0,
+		Interlace:        true, // Adam7 渐进式渲染
+	}
+	name, payload, err := simple_png.NewITXTChunk("XML:com.adobe.xmp", "", "", xmp, true)
+	if err != nil {
+		panic(err)
+	}
+	if _, err = enc.Encode(img, &buf,
+		simple_png.RawChunk{Name: simple_png.PHYSChunk, Data: phys},
+		simple_png.RawChunk{Name: name, Data: payload},
+	); err != nil {
+		panic(err)
+	}
+
+	// 或者替换已解析文件的像素（颜色类型与位深必须一致，尺寸不限），
+	// 同时按原位置保留其全部元数据 chunk；交错文件按交错重新编码
+	if err = p.ReplaceImage(newImg); err != nil {
+		panic(err)
+	}
+	var out bytes.Buffer
+	if _, err = p.WriteTo(&out); err != nil {
+		panic(err)
+	}
+```
+
+
+### 也支持自定义 chunk 解析~
+
+```go
+
+    type CustomChunkParse struct {
+	  // 你的结构体
+    }
+
+    func (c *CustomChunkParse) ChunkName() ChunkName {
+      return ChunkName("cust")
+    }
+
+    func (c *CustomChunkParse) Parse(chunk *chunk) error {
+      // 你的自定义解析
+      return nil
+    }
+
+    p, err := ParsePng(open) // ... 错误处理省略
+    c := &CustomChunkParse{}
+    err = p.ParseChunk(c)    // 消费该 chunk，之后可用 GetOtherChunkByName 取回
+
+```
+
+
+---
+
+# Png Struct
+
+
+  ![png-format.png](png-format.png)
+
+
+---
+## 基准测试
+
+与标准库 `image/png` 对比（benchtime 2s，win/amd64，同一台机器）：
+
+| | simple_png | 标准库 |
+|---|---|---|
+| demo.png（256×81 rgb）**解码** | 277 µs | 205 µs |
+| png-format.png（575×1083 rgba，131 个 idat 块）**解码** | **24.7 ms** | 25.2 ms |
+| png-format.png **仅 ParsePng**（chunk + 元数据，不解码像素） | **0.66 ms** | 标准库做不到 |
+| 575×1083 rgba **编码** | 52.0 ms | 37.0 ms |
+
+`IDATsToColor` 解码为标准图像类型（`*image.Gray`、`*image.Gray16`、`*image.RGBA`、`*image.RGBA64`、`*image.NRGBA`、`*image.NRGBA64`、`*image.Paletted`，与 jpeg/png 标准解码器约定一致），因此结果是完全合规的 `image.Image`，可用于 `draw` 或任何接受 `image.Image` 的管线。
+
+
+---
+## 并发安全
+
+多 goroutine 各自 `ParsePng` 解析（各自独立的 `Png` 实例）完全并发安全。同一个实例上，
+读方法（`RawChunks`、`RawChunkByName`、`GetOtherChunkByName`、`IDATsToColor`、`WriteTo`）
+与编辑方法（`ParseChunk`、`AddRawChunk`、`DeleteRawChunk`、`ReplaceImage`）
+均由内部 RWMutex 保护，混合并发读写同一实例同样安全。
+唯一要记住的规则：传给 `ParseChunk` 的自定义 chunk 的 `Parse` 回调不要回调
+同一个 `Png` 实例的方法（RWMutex 不可重入）。全部通过 `go test -race` 压力测试验证。
+
+
+---
+## TODO:
+ - 编码器性能调优（减少滤波启发式的内存分配）
+ - CI workflow（linux race 测试）
+
+
+---

@@ -286,8 +286,8 @@ func TestReplaceImage(t *testing.T) {
 	if p2.Width != newWidth || p2.Height != newHeight {
 		t.Fatalf("invalid size after replace: %dx%d", p2.Width, p2.Height)
 	}
-	if _, ok := p2.RawChunkByName("sRGB"); !ok {
-		t.Fatal("sRGB chunk was lost while replacing the image")
+	if p2.SRGB == nil {
+		t.Fatal("sRGB struct was lost while replacing the image")
 	}
 	codes := chunkTypeCodes(t, written)
 	if codes[0] != "IHDR" || codes[1] != "sRGB" || codes[len(codes)-1] != "IEND" {
@@ -380,6 +380,95 @@ func mustReadFile(t *testing.T, name string) []byte {
 		t.Skipf("%s is not readable in this environment: %v", name, err)
 	}
 	return data
+}
+
+func TestEncodeAdam7Truecolor(t *testing.T) {
+	const width, height = 9, 7
+	src := image.NewNRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			src.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(x * 28), G: uint8(y * 36), B: uint8(x ^ y), A: uint8(255 - x*7 - y*9),
+			})
+		}
+	}
+	data := mustEncode(t, src, Encoder{Interlace: true})
+	// std lib check + IHDR layout check
+	p, err := ParsePng(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.IHDR.InterlaceMethod != 1 {
+		t.Fatalf("expected an interlaced file, got method %d", p.IHDR.InterlaceMethod)
+	}
+	assertImageEqual(t, src, decodeWithStd(t, data))
+	// our own Adam7 decoder must agree as well
+	assertImageEqual(t, src, parseAndDecode(t, data))
+}
+
+func TestEncodeAdam7PaletteSubByte(t *testing.T) {
+	palette := color.Palette{
+		color.NRGBA{R: 10, G: 20, B: 30, A: 255},
+		color.NRGBA{R: 200, G: 50, B: 100, A: 255},
+		color.NRGBA{R: 0, G: 255, B: 255, A: 255},
+		color.NRGBA{R: 90, G: 40, B: 200, A: 128},
+		color.NRGBA{R: 255, G: 255, B: 255, A: 255},
+		color.NRGBA{R: 0, G: 0, B: 0, A: 0},
+	}
+	const width, height = 17, 5
+	src := image.NewPaletted(image.Rect(0, 0, width, height), palette)
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			src.Pix[y*width+x] = uint8((x + y) % len(palette))
+		}
+	}
+	data := mustEncode(t, src, Encoder{Interlace: true})
+	p, err := ParsePng(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.IHDR.BitDepth != 4 || p.IHDR.InterlaceMethod != 1 {
+		t.Fatalf("expected an interlaced 4 bit file, got depth %d method %d", p.IHDR.BitDepth, p.IHDR.InterlaceMethod)
+	}
+	assertImageEqual(t, src, decodeWithStd(t, data))
+	assertImageEqual(t, src, parseAndDecode(t, data))
+}
+
+func TestEncodeAdam7Gray16(t *testing.T) {
+	const width, height = 8, 6
+	src := image.NewGray16(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			src.SetGray16(x, y, color.Gray16{Y: uint16(6000*x + 9000*y + 3)})
+		}
+	}
+	data := mustEncode(t, src, Encoder{Interlace: true})
+	assertImageEqual(t, src, decodeWithStd(t, data))
+	assertImageEqual(t, src, parseAndDecode(t, data))
+}
+
+func TestEncodeAdam7TinyImages(t *testing.T) {
+	// the pass offsets skip whole passes of small images, every size here
+	// must roundtrip through the std decoder
+	sizes := []struct{ w, h int }{
+		{1, 1}, {2, 2}, {3, 3}, {4, 4}, {5, 5}, {1, 8}, {8, 1}, {7, 9},
+	}
+	for _, size := range sizes {
+		src := image.NewGray(image.Rect(0, 0, size.w, size.h))
+		for y := 0; y < size.h; y++ {
+			for x := 0; x < size.w; x++ {
+				src.SetGray(x, y, color.Gray{Y: uint8(17*x + 29*y + 5)})
+			}
+		}
+		for _, enc := range []Encoder{
+			{Interlace: true},
+			{Interlace: true, FilterStrategy: FilterNone},
+		} {
+			data := mustEncode(t, src, enc)
+			assertImageEqual(t, src, decodeWithStd(t, data))
+			assertImageEqual(t, src, parseAndDecode(t, data))
+		}
+	}
 }
 
 func BenchmarkEncode(b *testing.B) {

@@ -217,6 +217,50 @@ func (p *Png) emitConsumed(name ChunkName, c *chunk, idatIdx, textIdx, ztxtIdx, 
 		}
 		return p.TRNS.Data, nil
 
+	case SRGBChunk:
+		if p.SRGB == nil {
+			return c.data, nil
+		}
+		return []byte{p.SRGB.RenderingIntent}, nil
+
+	case ICCPChunk:
+		if p.ICCP == nil {
+			return c.data, nil
+		}
+		// c.data is name + null + method + compressed profile; keep it
+		// byte for byte when the name, the method and the (decompressed)
+		// profile were not modified
+		sep := bytes.IndexByte(c.data, 0x00)
+		if sep >= 0 {
+			if sep+2 <= len(c.data) {
+				if string(c.data[:sep]) == p.ICCP.Name && c.data[sep+1] == p.ICCP.CompressionMethod {
+					orig, err := zlibDecompress(c.data[sep+2:])
+					if err == nil && bytes.Equal(orig, p.ICCP.Profile) {
+						return c.data, nil
+					}
+				}
+			}
+			if p.ICCP.CompressionMethod != 0 {
+				return nil, errors.Errorf("unsupported iccp compression method %d", p.ICCP.CompressionMethod)
+			}
+			compressed, err := zlibCompress(p.ICCP.Profile)
+			if err != nil {
+				return nil, errors.WithStack(err)
+			}
+			out := make([]byte, 0, sep+2+len(compressed))
+			out = append(out, p.ICCP.Name...)
+			out = append(out, 0x00, p.ICCP.CompressionMethod)
+			out = append(out, compressed...)
+			return out, nil
+		}
+		return c.data, nil
+
+	case EXIFChunk:
+		if p.EXIF == nil {
+			return c.data, nil
+		}
+		return p.EXIF.Data, nil
+
 	case TIMEChunk:
 		if p.TIME == nil {
 			return c.data, nil

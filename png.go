@@ -31,6 +31,10 @@ type Png struct {
 	ZTXTs []*ZTXT
 	ITXTs []*ITXT
 
+	ICCP *ICCP
+	SRGB *SRGB
+	EXIF *EXIF
+
 	IEND       *IEND
 	OtherChunk map[ChunkName][]ChunkParse
 	chunks     []*chunk
@@ -275,6 +279,25 @@ func (p *Png) parseBaseChunk() error {
 		return errors.WithStack(err)
 	} else if found {
 		p.TIME = TIME
+	}
+
+	var ICCP = &ICCP{}
+	if found, err := p.parseOptionalChunk(ICCP); err != nil {
+		return errors.WithStack(err)
+	} else if found {
+		p.ICCP = ICCP
+	}
+	var SRGB = &SRGB{}
+	if found, err := p.parseOptionalChunk(SRGB); err != nil {
+		return errors.WithStack(err)
+	} else if found {
+		p.SRGB = SRGB
+	}
+	var EXIF = &EXIF{}
+	if found, err := p.parseOptionalChunk(EXIF); err != nil {
+		return errors.WithStack(err)
+	} else if found {
+		p.EXIF = EXIF
 	}
 
 	var TEXTs []*TEXT

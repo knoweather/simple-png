@@ -39,8 +39,7 @@ const (
 // other image.Image (premultiplied ones like *image.RGBA, *image.CMYK,
 // sub-images...) is converted to 8 bit straight alpha RGB first.
 //
-// All encoders produce non-interlaced filter method 0 streams, Adam7
-// interlace is only supported while decoding.
+// With Interlace the images are written as Adam7 interlaced streams.
 type Encoder struct {
 	// CompressionLevel is a zlib level: CompressionNone (-2), 1-9, or the
 	// zero value CompressionDefault (0) for the default compression.
@@ -52,6 +51,9 @@ type Encoder struct {
 	// ChunkSize limits the size of every IDAT chunk in bytes; 0 (the zero
 	// value) produces one single IDAT chunk.
 	ChunkSize int
+	// Interlace writes the scanlines as seven Adam7 interlacing passes
+	// (progressive rendering on every decoder), default is non-interlaced.
+	Interlace bool
 }
 
 // Encode encodes img as a png stream into w and returns the number of bytes
@@ -67,7 +69,7 @@ func (e *Encoder) Encode(img image.Image, w io.Writer, extra ...RawChunk) (int64
 	if err != nil {
 		return 0, err
 	}
-	parts, err := e.compose(enc, extra)
+	parts, err := e.composeRows(enc, extra, e.interlaceMethod())
 	if err != nil {
 		return 0, err
 	}
@@ -88,7 +90,6 @@ func (e *Encoder) Encode(img image.Image, w io.Writer, extra ...RawChunk) (int64
 func Encode(img image.Image, w io.Writer, extra ...RawChunk) (int64, error) {
 	return (&Encoder{}).Encode(img, w, extra...)
 }
-
 // ReplaceImage re-encodes the pixels of img and swaps them into an already
 // parsed png, keeping every other chunk (metadata like tEXt, iTXt/XMP,
 // tIME, raw chunks...) and its position in the stream untouched. The new
@@ -113,7 +114,7 @@ func (p *Png) ReplaceImage(img image.Image) error {
 			"cannot replace the image: the png has color type %d with bit depth %d, the given image has color type %d with bit depth %d",
 			p.IHDR.ColorType, p.IHDR.BitDepth, enc.colorType, enc.bitDepth)
 	}
-	parts, err := (&Encoder{}).compose(enc, nil)
+	parts, err := (&Encoder{}).composeRows(enc, nil, p.IHDR.InterlaceMethod)
 	if err != nil {
 		return err
 	}
@@ -171,14 +172,30 @@ type fileChunk struct {
 	data []byte
 }
 
-// compose builds the full chunk list of a png datastream: IHDR, [PLTE,
-// tRNS], the extra chunks, the IDAT chunks and IEND.
+// interlaceMethod returns the IHDR interlace method value of an Encoder.
+func (e *Encoder) interlaceMethod() uint8 {
+	if e.Interlace {
+		return 1
+	}
+	return 0
+}
+
+// compose builds the full chunk list of a png datastream from the encoder
+// settings: IHDR, [PLTE, tRNS], the extra chunks, the IDAT chunks and IEND.
 func (e *Encoder) compose(enc *encodedImage, extra []RawChunk) ([]fileChunk, error) {
+	return e.composeRows(enc, extra, e.interlaceMethod())
+}
+
+// composeRows builds the full chunk list of a png datastream with a given
+// interlace method: IHDR, [PLTE, tRNS], the extra chunks, the IDAT chunks
+// and IEND. ReplaceImage uses it to honor the interlace flag of the file it
+// replaces the pixel data of.
+func (e *Encoder) composeRows(enc *encodedImage, extra []RawChunk, interlace uint8) ([]fileChunk, error) {
 	parts := make([]fileChunk, 0, 4+len(extra))
 	ihdr := make([]byte, 13)
 	binary.BigEndian.PutUint32(ihdr[:4], uint32(enc.width))
 	binary.BigEndian.PutUint32(ihdr[4:8], uint32(enc.height))
-	ihdr[8], ihdr[9], ihdr[10], ihdr[11], ihdr[12] = enc.bitDepth, enc.colorType, 0, 0, 0
+	ihdr[8], ihdr[9], ihdr[10], ihdr[11], ihdr[12] = enc.bitDepth, enc.colorType, 0, 0, interlace
 	parts = append(parts, fileChunk{IHDRChunk, ihdr})
 	if len(enc.plte) > 0 {
 		parts = append(parts, fileChunk{PLTEChunk, enc.plte})
@@ -203,7 +220,11 @@ func (e *Encoder) compose(enc *encodedImage, extra []RawChunk) ([]fileChunk, err
 		}
 		parts = append(parts, fileChunk{ex.Name, ex.Data})
 	}
-	filtered, err := e.applyFilters(enc)
+	// one zlib stream over all passes (or the whole image when not
+	// interlaced), the filter heuristic restarts per pass with an empty
+	// previous scanline as the spec requires
+	bpp := (int(enc.channels)*int(enc.bitDepth) + 7) / 8
+	filtered, err := e.filterScanlines(enc, bpp, interlace)
 	if err != nil {
 		return nil, err
 	}
@@ -353,19 +374,110 @@ func scanRows(pix []byte, stride int, bounds image.Rectangle, bps, width, height
 	return rows
 }
 
-// applyFilters applies png filter method 0 to the unfiltered scanlines.
-func (e *Encoder) applyFilters(enc *encodedImage) ([]byte, error) {
-	stride := enc.stride()
-	out := make([]byte, 0, len(enc.rows)*(stride+1))
-	if e.FilterStrategy == FilterNone {
-		for _, row := range enc.rows {
-			if len(row) != stride {
-				return nil, errors.New("internal error: inconsistent scanline size")
+// interlacePasses builds the unfiltered scanlines of the seven Adam7 passes
+// from the unfiltered scanlines of the whole image. Every pass is a row
+// slice of its own: pass 1 starts at pixel (0,0), pass 4 at (2,0)..., the
+// skipped passes of very small images are nil.
+func interlacePasses(enc *encodedImage) ([][][]byte, error) {
+	passes := make([][][]byte, 0, 7)
+	if enc.bitDepth >= 8 {
+		bps := int(enc.channels) * int(enc.bitDepth) / 8
+		for _, ps := range adam7Passes {
+			pw, ph := adam7PassSize(enc.width, enc.height, ps)
+			if pw <= 0 || ph <= 0 {
+				passes = append(passes, nil)
+				continue
 			}
+			rows := make([][]byte, 0, ph)
+			for y := ps.yOff; y < enc.height; y += ps.dy {
+				src := enc.rows[y]
+				row := make([]byte, 0, pw*bps)
+				for x := ps.xOff; x < enc.width; x += ps.dx {
+					row = append(row, src[x*bps:(x+1)*bps]...)
+				}
+				rows = append(rows, row)
+			}
+			passes = append(passes, rows)
+		}
+		return passes, nil
+	}
+	// sub-byte samples (palette depths 1, 2, 4), packed MSB-first with
+	// padding in the last byte of every pass scanline
+	depth := int(enc.bitDepth)
+	spB := 8 / depth
+	mask := byte(1)<<uint(depth) - 1
+	for _, ps := range adam7Passes {
+		pw, ph := adam7PassSize(enc.width, enc.height, ps)
+		if pw <= 0 || ph <= 0 {
+			passes = append(passes, nil)
+			continue
+		}
+		stride := (pw*int(enc.channels)*int(enc.bitDepth) + 7) / 8
+		rows := make([][]byte, 0, ph)
+		for y := ps.yOff; y < enc.height; y += ps.dy {
+			src := enc.rows[y]
+			row := make([]byte, stride)
+			k := 0
+			for x := ps.xOff; x < enc.width; x += ps.dx {
+				v := (src[x/spB] >> uint(8-depth*(x%spB+1))) & mask
+				writeSample(row, depth, k, uint16(v))
+				k++
+			}
+			rows = append(rows, row)
+		}
+		passes = append(passes, rows)
+	}
+	return passes, nil
+}
+
+// filterScanlines applies png filter method 0 to the unfiltered scanlines:
+// one filter sequence for the whole image when interlace is 0, else one
+// sequence per Adam7 pass concatenated (the pass layout of interlacePasses
+// restarts the filter heuristic per pass with an empty previous scanline).
+func (e *Encoder) filterScanlines(enc *encodedImage, bpp int, interlace uint8) ([]byte, error) {
+	if interlace == 0 {
+		return e.applyFilterData(enc.rows, int(bpp))
+	}
+	passes, err := interlacePasses(enc)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, (enc.stride()+1)*enc.height)
+	for _, rows := range passes {
+		if len(rows) == 0 {
+			continue
+		}
+		filtered, err := e.applyFilterData(rows, int(bpp))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, filtered...)
+	}
+	return out, nil
+}
+
+// applyFilterData applies png filter method 0 to one sequence of scanlines
+// (all rows of the full image or all rows of one Adam7 pass). Rows may vary
+// in width across sequences, inside a sequence they are equal.
+func (e *Encoder) applyFilterData(rows [][]byte, bpp int) ([]byte, error) {
+	var capStrides int
+	for _, row := range rows {
+		capStrides += len(row) + 1
+	}
+	out := make([]byte, 0, capStrides)
+	if e.FilterStrategy == FilterNone {
+		for _, row := range rows {
 			out = append(out, 0)
 			out = append(out, row...)
 		}
 		return out, nil
+	}
+	// find the widest scanline for the shared scratch buffers
+	stride := 0
+	for _, row := range rows {
+		if len(row) > stride {
+			stride = len(row)
+		}
 	}
 	// heuristic: for every scanline compute all five filter types and keep
 	// the one with the smallest sum of absolute values of the filtered
@@ -374,14 +486,13 @@ func (e *Encoder) applyFilters(enc *encodedImage) ([]byte, error) {
 	// the filter types work per byte with a bpp distance of one
 	// sample, more precisely one full pixel in bytes (2 bytes for 16 bit
 	// gray samples, 8 bytes for 64 bit rgba samples)
-	bpp := (int(enc.channels)*int(enc.bitDepth) + 7) / 8
 	var bufs [5][]byte
 	for i := range bufs {
 		bufs[i] = make([]byte, stride)
 	}
 	var sums [5]int
 	prev := make([]byte, stride)
-	for _, row := range enc.rows {
+	for _, row := range rows {
 		best := 0
 		for ft := 0; ft < 5; ft++ {
 			sums[ft] = filterRow(bufs[ft], row, prev, bpp, ft)
@@ -390,7 +501,7 @@ func (e *Encoder) applyFilters(enc *encodedImage) ([]byte, error) {
 			}
 		}
 		out = append(out, byte(best))
-		out = append(out, bufs[best]...)
+		out = append(out, bufs[best][:len(row)]...)
 		copy(prev, row)
 	}
 	return out, nil

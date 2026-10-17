@@ -184,7 +184,7 @@ type CustomChunkParse struct {
 }
 
 func (c *CustomChunkParse) ChunkName() ChunkName {
-	return ChunkName("sRGB")
+	return ChunkName("sPLT")
 }
 
 func (c *CustomChunkParse) Parse(chunk *chunk) error {
@@ -193,27 +193,24 @@ func (c *CustomChunkParse) Parse(chunk *chunk) error {
 }
 
 func TestCustomChunk(t *testing.T) {
-	open, err := os.Open("./png-format.png")
-	if err != nil {
-		t.Skipf("png-format.png is not readable in this environment: %v", err)
-	}
-	defer open.Close()
-	p, err := ParsePng(open)
+	// a sPLT chunk the library does not decode natively: it stays raw
+	// until a custom ParseChunk call consumes it
+	data := buildPng(
+		chunkBytes("IHDR", ihdrBytes(1, 1, 8, 0)),
+		chunkBytes("sPLT", []byte{0xAB}),
+		idatBytes(compressRaw([]byte{0, 0x55})),
+	)
+	p, err := ParsePng(bytes.NewReader(data))
 	if err != nil {
 		t.Fatal(err)
 	}
-	log.Println(p.BKGD, p.ZTXTs, p.TIME, p.IHDR)
-	for i, idaT := range p.IDATs {
-		log.Println(i, *idaT)
-	}
 
-	// png-format.png contains a sRGB chunk unknown to the parser
 	var unknown []ChunkName
 	for _, c := range p.chunks {
 		unknown = append(unknown, ChunkName(c.code[:]))
 	}
-	if len(unknown) != 1 || unknown[0] != "sRGB" {
-		t.Fatalf("expected only the unknown sRGB chunk, got %v", unknown)
+	if len(unknown) != 1 || unknown[0] != "sPLT" {
+		t.Fatalf("expected only the unknown sPLT chunk, got %v", unknown)
 	}
 
 	// parse the custom chunk and get it back by name
@@ -221,10 +218,10 @@ func TestCustomChunk(t *testing.T) {
 	if err = p.ParseChunk(c); err != nil {
 		t.Fatalf("custom chunk parse failed: %v", err)
 	}
-	if len(c.Data) != 1 {
+	if len(c.Data) != 1 || c.Data[0] != 0xAB {
 		t.Fatalf("invalid custom chunk data: %v", c.Data)
 	}
-	found, err := p.GetOtherChunkByName("sRGB")
+	found, err := p.GetOtherChunkByName("sPLT")
 	if err != nil || len(found) != 1 || found[0] != c {
 		t.Fatalf("GetOtherChunkByName failed: %v %v", found, err)
 	}
@@ -716,7 +713,7 @@ func TestRawChunks(t *testing.T) {
 	// sRGB stays in the file as a raw chunk, the standard crc value matches
 	data := buildPng(
 		chunkBytes("IHDR", ihdrBytes(1, 1, 8, 0)),
-		chunkBytes("sRGB", []byte{0}), // perceptual
+		chunkBytes("sPLT", []byte{0xAB}), // unknown to the parser
 		idatBytes(compressRaw([]byte{0, 0, 0})),
 	)
 	p, err := ParsePng(bytes.NewReader(data))
@@ -724,14 +721,213 @@ func TestRawChunks(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw := p.RawChunks()
-	if len(raw) != 1 || raw[0].Name != "sRGB" || len(raw[0].Data) != 1 {
+	if len(raw) != 1 || raw[0].Name != "sPLT" || len(raw[0].Data) != 1 {
 		t.Fatalf("invalid raw chunks: %+v", raw)
 	}
 	if _, ok := p.RawChunkByName("eXIf"); ok {
 		t.Fatal("eXIf chunk should not exist")
 	}
-	if exifData, ok := p.RawChunkByName("sRGB"); !ok || len(exifData) != 1 {
-		t.Fatalf("invalid srgb raw chunk: %+v", exifData)
+	if splData, ok := p.RawChunkByName("sPLT"); !ok || len(splData) != 1 {
+		t.Fatalf("invalid sPLT raw chunk: %+v", splData)
+	}
+}
+
+func TestSRGBStruct(t *testing.T) {
+	data := buildPng(
+		chunkBytes("IHDR", ihdrBytes(1, 1, 8, 0)),
+		chunkBytes("sRGB", []byte{0}),
+		idatBytes(compressRaw([]byte{0, 0x55})),
+	)
+	p, err := ParsePng(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.SRGB == nil || p.SRGB.RenderingIntent != 0 {
+		t.Fatalf("invalid srgb: %+v", p.SRGB)
+	}
+	// untouched: byte for byte write back
+	written, err := p.MarshalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(written, data) {
+		t.Fatal("the untouched sRGB chunk was not written back byte for byte")
+	}
+	// modified: the new rendering intent lands in the file
+	p.SRGB.RenderingIntent = 2
+	written, err = p.MarshalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := ParsePng(bytes.NewReader(written))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p2.SRGB == nil || p2.SRGB.RenderingIntent != 2 {
+		t.Fatalf("edited rendering intent was not written: %+v", p2.SRGB)
+	}
+}
+
+func TestICCPStruct(t *testing.T) {
+	profile := []byte("ICC PROFILE DATA v1")
+	var iccpPayload []byte
+	iccpPayload = append(iccpPayload, []byte("ICC profile")...)
+	iccpPayload = append(iccpPayload, 0x00, 0) // name + null + zlib
+	iccpPayload = append(iccpPayload, compressRaw(profile)...)
+	data := buildPng(
+		chunkBytes("IHDR", ihdrBytes(1, 1, 8, 0)),
+		chunkBytes("iCCP", iccpPayload),
+		idatBytes(compressRaw([]byte{0, 0x55})),
+	)
+	p, err := ParsePng(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.ICCP == nil || p.ICCP.Name != "ICC profile" || string(p.ICCP.Profile) != string(profile) {
+		t.Fatalf("invalid iccp: %s, %s", p.ICCP.Name, p.ICCP.Profile)
+	}
+	// untouched: byte for byte write back
+	written, err := p.MarshalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(written, data) {
+		t.Fatal("the untouched iCCP chunk was not written back byte for byte")
+	}
+	// a replaced profile is compressed again while writing
+	p2 := []byte("NEW ICC PROFILE DATA")
+	p.ICCP.Profile = p2
+	written, err = p.MarshalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p3, err := ParsePng(bytes.NewReader(written))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p3.ICCP == nil || p3.ICCP.Name != "ICC profile" || string(p3.ICCP.Profile) != string(p2) {
+		t.Fatalf("edited profile was not written: %s, %s", p3.ICCP.Name, p3.ICCP.Profile)
+	}
+}
+
+func TestICCAndSRGBBoth(t *testing.T) {
+	// the spec forbids a combination of both, but such files exist: keep
+	// parsing them, both chunks are preserved
+	profile := []byte("ICC")
+	var iccpPayload []byte
+	iccpPayload = append(iccpPayload, []byte("p")...)
+	iccpPayload = append(iccpPayload, 0x00, 0)
+	iccpPayload = append(iccpPayload, compressRaw(profile)...)
+	data := buildPng(
+		chunkBytes("IHDR", ihdrBytes(1, 1, 8, 0)),
+		chunkBytes("iCCP", iccpPayload),
+		chunkBytes("sRGB", []byte{1}),
+		idatBytes(compressRaw([]byte{0, 0x55})),
+	)
+	p, err := ParsePng(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.ICCP == nil || p.SRGB == nil {
+		t.Fatalf("both chunks must be parsed, iccp: %+v, srgb: %+v", p.ICCP, p.SRGB)
+	}
+}
+
+func TestEXIFStruct(t *testing.T) {
+	// a hand-made minimal little-endian tiff stream: IFD0 with one ASCII
+	// entry and one pointer to the Exif IFD, which holds a rational
+	var tk = binary.LittleEndian
+	var tiff []byte
+	tiff = append(tiff, 'I', 'I')
+	var w2 [2]byte
+	var w4 [4]byte
+	tk.PutUint16(w2[:], 42)
+	tiff = append(tiff, w2[:]...)
+	tk.PutUint32(w4[:], 8)
+	tiff = append(tiff, w4[:]...)
+	putEntry := func(tag, typ uint16, count uint32, value []byte) []byte {
+		out := make([]byte, 0, 12)
+		var e2 [2]byte
+		var e4 [4]byte
+		tk.PutUint16(e2[:], tag)
+		out = append(out, e2[:]...)
+		tk.PutUint16(e2[:], typ)
+		out = append(out, e2[:]...)
+		tk.PutUint32(e4[:], count)
+		out = append(out, e4[:]...)
+		out = append(out, value...)
+		for len(out) < 12 {
+			out = append(out, 0)
+		}
+		return out
+	}
+	// IFD0 at 8 with 2 entries (30 bytes)
+	tk.PutUint16(w2[:], 2)
+	tiff = append(tiff, w2[:]...)
+	tiff = append(tiff, putEntry(0x010E, 2, 4, []byte{'H', 'i', '!', 0})...)
+	tk.PutUint32(w4[:], 38) // ExifIFDPointer -> 38
+	tiff = append(tiff, putEntry(0x8769, 4, 1, w4[:])...)
+	tk.PutUint32(w4[:], 0) // no linked IFD
+	tiff = append(tiff, w4[:]...)
+	// Exif IFD at 38 with 1 entry (18 bytes)
+	tk.PutUint16(w2[:], 1)
+	tiff = append(tiff, w2[:]...)
+	tk.PutUint32(w4[:], 56) // the rational lives at 56
+	tiff = append(tiff, putEntry(0x829A, 5, 1, w4[:])...)
+	tk.PutUint32(w4[:], 0)
+	tiff = append(tiff, w4[:]...)
+	// the 1/100 second exposure time
+	tk.PutUint32(w4[:], 1)
+	tiff = append(tiff, w4[:]...)
+	tk.PutUint32(w4[:], 100)
+	tiff = append(tiff, w4[:]...)
+
+	data := buildPng(
+		chunkBytes("IHDR", ihdrBytes(1, 1, 8, 0)),
+		chunkBytes("eXIf", tiff),
+		idatBytes(compressRaw([]byte{0, 0x55})),
+	)
+	p, err := ParsePng(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.EXIF == nil || !bytes.Equal(p.EXIF.Data, tiff) {
+		t.Fatal("the eXIf blob was not kept byte for byte")
+	}
+	entries, err := p.EXIF.Entries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries (IFD0 + pointer + Exif IFD), got %d: %+v", len(entries), entries)
+	}
+	// the IFD0 ASCII entry with its inline value
+	if entries[0].Tag != 0x010E || entries[0].Type != 2 || entries[0].Count != 4 ||
+		string(entries[0].Value) != "Hi!\x00" {
+		t.Fatalf("invalid image description entry: %+v", entries[0])
+	}
+	// the ExifIFDPointer LONG entry
+	if entries[1].Tag != 0x8769 || entries[1].Type != 4 || entries[1].Count != 1 ||
+		tk.Uint32(entries[1].Value[:4]) != 38 {
+		t.Fatalf("invalid exif pointer entry: %+v", entries[1])
+	}
+	// the rational of the Exif IFD, resolved through the offset
+	if entries[2].Tag != 0x829A || entries[2].Type != 5 || entries[2].Count != 1 ||
+		tk.Uint32(entries[2].Value[:4]) != 1 || tk.Uint32(entries[2].Value[4:8]) != 100 {
+		t.Fatalf("invalid exposure time entry: %+v", entries[2])
+	}
+	// untouched: byte for byte write back
+	written, err := p.MarshalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(written, data) {
+		t.Fatal("the untouched eXIf chunk was not written back byte for byte")
+	}
+	// a truncated tiff stream must produce a clean error
+	broken := &EXIF{Data: tiff[:4]}
+	if _, err = broken.Entries(); err == nil {
+		t.Fatal("expected an error for a truncated tiff stream")
 	}
 }
 
@@ -825,14 +1021,14 @@ func TestEditMetadata(t *testing.T) {
 func TestDeleteRawChunk(t *testing.T) {
 	data := buildPng(
 		chunkBytes("IHDR", ihdrBytes(1, 1, 8, 0)),
-		chunkBytes("sRGB", []byte{0}),
+		chunkBytes("sPLT", []byte{0xAB}),
 		idatBytes(compressRaw([]byte{0, 0x55})),
 	)
 	p, err := ParsePng(bytes.NewReader(data))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := p.DeleteRawChunk("sRGB"); n != 1 {
+	if n := p.DeleteRawChunk("sPLT"); n != 1 {
 		t.Fatalf("expected to remove 1 chunk, removed %d", n)
 	}
 	written, err := p.MarshalBytes()

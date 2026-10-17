@@ -33,6 +33,10 @@ const (
 	ZTXTChunk ChunkName = "zTXt"
 	ITXTChunk ChunkName = "iTXt"
 	TIMEChunk ChunkName = "tIME"
+
+	SRGBChunk ChunkName = "sRGB"
+	ICCPChunk ChunkName = "iCCP"
+	EXIFChunk ChunkName = "eXIf"
 )
 
 // ISO_3309_CRC32 computes the 32-bit CRC defined in ISO 3309 (ITU-T V.42) and
@@ -929,4 +933,232 @@ func (z *ZTXT) Parse(chunk *chunk) error {
 	}
 	z.Text = string(text)
 	return nil
+}
+
+/*
+
+--------------------------------------------------------------------------------------
+
+*/
+
+// SRGB
+// The sRGB chunk conveys the legacy sRGB gamma, chromaticity, luminance, and
+// color data. It contains:
+//
+//	Rendering intent: 1 byte
+//
+// Legal rendering intents are:
+//
+//	0: perceptual
+//	1: relative colorimetric
+//	2: saturation
+//	3: absolute colorimetric
+//
+// A PNG datastream shall contain no more than one sRGB chunk. A decoder
+// encountering both iCCP and sRGB chunks is free to pick one. This library
+// keeps both present in width and leaves the decision to the caller.
+//
+// If present, this chunk must precede the first IDAT chunk.
+type SRGB struct {
+	RenderingIntent uint8
+}
+
+func (s *SRGB) ChunkName() ChunkName {
+	return SRGBChunk
+}
+
+func (s *SRGB) Parse(chunk *chunk) error {
+	if chunk.data == nil || len(chunk.data) != 1 {
+		return errors.New("invalid srgb chunk data")
+	}
+	s.RenderingIntent = chunk.data[0]
+	return nil
+}
+
+/*
+
+--------------------------------------------------------------------------------------
+
+*/
+
+// ICCP
+// The iCCP chunk embeds an ICC profile. It contains:
+//
+//	Profile name:         1-79 bytes (Latin-1) followed by a null separator
+//	Compression method:   1 byte (only 0 = zlib/deflate is defined)
+//	Compressed profile:   n bytes, a zlib datastream with the profile
+//
+// A PNG datastream shall contain no more than one iCCP chunk. On the write
+// side the chunk is reproduced byte for byte unless the Profile field was
+// modified (or the profile name or the compression method changed), in which
+// case the new profile is compressed again before writing.
+//
+// The profile itself is parsed left as ICC bytes, use Profile.
+type ICCP struct {
+	// Name is the Latin-1 profile name, e.g. "ICC profile".
+	Name string
+	// CompressionMethod is the compression of the profile as stored, only
+	// the value 0 (zlib/deflate) is defined in the spec.
+	CompressionMethod uint8
+	// Profile is the decompressed ICC profile bytes; modify this field to
+	// replace the profile, the chunk is re-compressed while writing.
+	Profile []byte
+}
+
+func (i *ICCP) ChunkName() ChunkName {
+	return ICCPChunk
+}
+
+func (i *ICCP) Parse(chunk *chunk) error {
+	sep := bytes.IndexByte(chunk.data, 0x00)
+	if sep < 1 || sep > 79 {
+		return errors.New("invalid iccp profile name")
+	}
+	if len(chunk.data) < sep+2 {
+		return errors.New("invalid iccp chunk data")
+	}
+	i.Name = string(chunk.data[:sep])
+	rest := chunk.data[sep+1:]
+	i.CompressionMethod = rest[0]
+	if i.CompressionMethod != 0 {
+		return errors.Errorf("unsupported iccp compression method %d", i.CompressionMethod)
+	}
+	profile, err := zlibDecompress(rest[1:])
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	i.Profile = profile
+	return nil
+}
+
+/*
+
+--------------------------------------------------------------------------------------
+
+*/
+
+// EXIF
+// The eXIf chunk holds EXIF metadata: an Exchangeable Image File Format
+// (TIFF) structure, byte order II (little-endian) or MM (big-endian), with
+// one or more image file directories (IFD).
+//
+// Multiple eXIf chunks are allowed by the spec; the library parses the FIRST
+// one into the EXIF struct while the others stay raw (see RawChunks).
+//
+// The TIFF blob is kept as-is: the chunk is re-produced byte for byte unless
+// the Data field was modified. Use Entries for the structured read-only view
+// over the file directory (the IFD0 and the Exif and GPS sub-IFDs are
+// flattened).
+type EXIF struct {
+	// Data is the TIFF stream of the chunk without the chunk type fields.
+	Data []byte
+}
+
+// ExifEntry is one entry of an exIf IFD image directory entry, with the raw
+// bytes of its value (already resolved through the offset when the value
+// does not fit into the entry itself).
+type ExifEntry struct {
+	Tag   uint16
+	Type  uint16
+	Count uint32
+	Value []byte
+}
+
+// exifTypeSize returns the byte size of one element of the given TIFF value
+// type, 0 for unknown types.
+func exifTypeSize(t uint16) int {
+	switch t {
+	case 1, 2, 6, 7: // BYTE, ASCII, SBYTE, UNDEFINED
+		return 1
+	case 3, 8: // SHORT, SSHORT
+		return 2
+	case 4, 9, 11, 13: // LONG, SLONG, FLOAT, IFD
+		return 4
+	case 5, 10, 12: // RATIONAL, SRATIONAL, DOUBLE
+		return 8
+	}
+	return 0
+}
+
+func (e *EXIF) ChunkName() ChunkName {
+	return EXIFChunk
+}
+
+func (e *EXIF) Parse(chunk *chunk) error {
+	e.Data = append(e.Data, chunk.data...)
+	return nil
+}
+
+// Entries parses the TIFF structure of the chunk and returns every IFD entry
+// of the IFD0 plus its linked IFDs flattened (the pointer entries to the
+// Exif and GPS sub-IFDs are included). The original bytes are not touched,
+// the result is a read-only view.
+func (e *EXIF) Entries() ([]ExifEntry, error) {
+	if len(e.Data) < 8 {
+		return nil, errors.New("invalid exif tiff stream")
+	}
+	var by binary.ByteOrder = binary.LittleEndian
+	switch string(e.Data[:2]) {
+	case "II":
+	case "MM":
+		by = binary.BigEndian
+	default:
+		return nil, errors.New("invalid exif byte order")
+	}
+	if by.Uint16(e.Data[2:4]) != 42 {
+		return nil, errors.New("invalid exif tiff magic")
+	}
+	// walk the IFD chain and the Exif/GPS sub-IFDs with guards against
+	// malformed (or hostile) offsets
+	var out []ExifEntry
+	visited := map[uint32]bool{0: true}
+	pending := []uint32{by.Uint32(e.Data[4:8])}
+	for len(pending) > 0 {
+		off := int(pending[0])
+		pending = pending[1:]
+		if visited[uint32(off)] || len(e.Data) < off+2 {
+			continue
+		}
+		visited[uint32(off)] = true
+		count := int(by.Uint16(e.Data[off : off+2]))
+		// 12 bytes per entry + 4 bytes next-IFD-offset must stay in bounds
+		if count > 0x1000 || len(e.Data) < off+2+count*12+4 {
+			return nil, errors.Errorf("invalid exif ifd at offset %d", off)
+		}
+		next := by.Uint32(e.Data[off+2+count*12 : off+6+count*12])
+		if !visited[next] {
+			pending = append(pending, next)
+		}
+		for i := 0; i < count; i++ {
+			eo := off + 2 + i*12
+			tag := by.Uint16(e.Data[eo : eo+2])
+			typ := by.Uint16(e.Data[eo+2 : eo+4])
+			cnt := by.Uint32(e.Data[eo+4 : eo+8])
+			size := exifTypeSize(typ)
+			if size == 0 {
+				return nil, errors.Errorf("unknown exif type %d at offset %d", typ, eo)
+			}
+			total := size * int(cnt)
+			var value []byte
+			if total <= 4 {
+				value = e.Data[eo+8 : eo+8+total]
+			} else {
+				vOff := int(by.Uint32(e.Data[eo+8 : eo+12]))
+				if len(e.Data) < vOff+total {
+					return nil, errors.Errorf("invalid exif value offset at tag %d", tag)
+				}
+				value = e.Data[vOff : vOff+total]
+			}
+			out = append(out, ExifEntry{Tag: tag, Type: typ, Count: cnt, Value: value})
+			// follow the sub-IFD pointers of the spec: side chains, not
+			// through the next-IFD-off offset chain
+			if (tag == 0x8769 || tag == 0x8825 || tag == 0x014A) && typ == 4 && cnt == 1 {
+				sub := by.Uint32(value[:4])
+				if !visited[sub] {
+					pending = append(pending, sub)
+				}
+			}
+		}
+	}
+	return out, nil
 }

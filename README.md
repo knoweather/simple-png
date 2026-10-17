@@ -1,8 +1,27 @@
-# Simple-png
+# simple-png
 
-### pure go png parse
+**English** | [简体中文](./README.zh-CN.md)
 
-### [PNG (Portable Network Graphics) Specification](https://www.w3.org/TR/PNG-Chunks.html)
+A pure Go PNG library working at the chunk level: parse, inspect, edit and
+write back PNG datastreams while untouched chunks stay **byte for byte
+identical** — plus a full image encoder with filter/compression control.
+
+- decode pixels to standard `image.Image` types (`*image.Gray`,
+  `*image.Gray16`, `*image.NRGBA`, `*image.NRGBA64`, `*image.RGBA`,
+  `*image.RGBA64`, `*image.Paletted`), Adam7 interlaced and tRNS transparency
+  supported, faster than the standard library on large images
+- structured chunks: IHDR, PLTE, tEXt / zTXt / iTXt (e.g. XMP), tIME, pHYs,
+  tRNS, bKGD, hIST, sBIT, cHRM, gAMA, **sRGB, iCCP, eXIf** (IFD entries view)
+- every not-decoded chunk (e.g. sPLT) stays reachable in raw form, and any
+  custom chunk type can be parsed with a few lines of code
+- write back: chunks untouched during parsing are copied verbatim, modified
+  chunks are re-serialized (zTXt/iCCP stay compressed-byte-identical unless
+  their payload changed) and every CRC is recomputed
+- encode standard library images with the five-filter adaptive heuristic,
+  optional Adam7 interlace, any zlib level and free ancillary chunk injection
+  (e.g. inject uncompressed XMP by hand)
+
+[PNG (Portable Network Graphics) Specification](https://www.w3.org/TR/PNG-Chunks.html)
 
 ## Install
 
@@ -18,16 +37,7 @@ and import it:
 
 ```
 
-## Concurrency
-
-Parsing with separate `Png` instances (one `ParsePng` per goroutine) is fully
-concurrency safe. On a single instance, the readers (`RawChunks`, `RawChunkByName`,
-`GetOtherChunkByName`, `IDATsToColor`, `WriteTo`) and the editing methods
-(`ParseChunk`, `AddRawChunk`, `DeleteRawChunk`, `ReplaceImage`) are guarded by an
-internal RWMutex, so mixed concurrent read/write use of one instance is also
-safe. One rule to remember: the `Parse` callback of a custom chunk passed to
-`ParseChunk` must not call back into the same `Png` instance (an RWMutex is not
-reentrant). Everything is verified with `go test -race` stress tests.
+## Parse & decode
 
 ```go
 
@@ -43,7 +53,7 @@ reentrant). Everything is verified with `go test -race` stress tests.
 	}
 	// print png image data
 	log.Println(*p.IDATs[0])
-	// print png addition text
+	// print png additional text
 	log.Println(*p.TEXTs[0])
 
 	// decode the image (idat -> unfiltered pixels -> standard image.Image)
@@ -61,8 +71,25 @@ reentrant). Everything is verified with `go test -race` stress tests.
 		}
 	}
 
-	// chunks the library does not decode natively yet (eXIf, sRGB, iCCP...)
-	// are exposed in raw form
+	// struct-backed chunks: sRGB rendering intent, iCCP profile, eXIf IFDs
+	if p.SRGB != nil {
+		log.Println("sRGB rendering intent:", p.SRGB.RenderingIntent)
+	}
+	if p.ICCP != nil {
+		log.Println("iCCP profile:", p.ICCP.Name, len(p.ICCP.Profile), "bytes")
+	}
+	if p.EXIF != nil {
+		// flattened read-only view over IFD0 + Exif/GPS sub-IFDs
+		entries, err := p.EXIF.Entries()
+		if err != nil {
+			panic(err)
+		}
+		for _, e := range entries {
+			log.Printf("exif entry tag %#x type %d count %d", e.Tag, e.Type, e.Count)
+		}
+	}
+
+	// chunks the library does not decode natively (e.g. sPLT) come back raw
 	for _, rc := range p.RawChunks() {
 		log.Println(rc.Name, len(rc.Data))
 	}
@@ -91,7 +118,7 @@ reentrant). Everything is verified with `go test -race` stress tests.
 	if err = p.AddRawChunk(name, payload); err != nil {
 		panic(err)
 	}
-	// drop the eXIf we do not want anymore
+	// drop a chunk we do not want anymore
 	p.DeleteRawChunk("eXIf")
 	// update the tIME
 	p.TIME.Year = 2026
@@ -117,12 +144,14 @@ reentrant). Everything is verified with `go test -race` stress tests.
 		panic(err)
 	}
 
-	// full control: zlib level (CompressionNone/1..9), filter strategy and
-	// IDAT chunk size, plus ancillary chunks written before the first IDAT
+	// full control: zlib level (CompressionNone/1..9), filter strategy, IDAT
+	// chunk size, Adam7 interlace, plus ancillary chunks written before the
+	// first IDAT
 	enc := &simple_png.Encoder{
 		CompressionLevel: 9,
 		FilterStrategy:   simple_png.FilterHeuristic,
 		ChunkSize:        0,
+		Interlace:        true, // Adam7 progressive rendering
 	}
 	name, payload, err := simple_png.NewITXTChunk("XML:com.adobe.xmp", "", "", xmp, true)
 	if err != nil {
@@ -136,7 +165,8 @@ reentrant). Everything is verified with `go test -race` stress tests.
 	}
 
 	// or replace the pixels of an already parsed file (the color type and
-	// bit depth must match) while keeping ALL its metadata chunks
+	// bit depth must match, any size) while keeping ALL its metadata chunks
+	// in their original positions; interlaced files are re-encoded interlaced
 	if err = p.ReplaceImage(newImg); err != nil {
 		panic(err)
 	}
@@ -144,7 +174,7 @@ reentrant). Everything is verified with `go test -race` stress tests.
 	if _, err = p.WriteTo(&out); err != nil {
 		panic(err)
 	}
-	```
+```
 
 
 ### You also can custom chunk parse~
@@ -152,50 +182,38 @@ reentrant). Everything is verified with `go test -race` stress tests.
 ```go
 
     type CustomChunkParse struct {
-	  // your struct 	
+	  // your struct
     }
-    
+
     func (c *CustomChunkParse) ChunkName() ChunkName {
       return ChunkName("cust")
     }
-    
+
     func (c *CustomChunkParse) Parse(chunk *chunk) error {
       // your custom parse
       return nil
     }
-    
-    func TestCustomChunk(t *testing.T) {
-      open, err := os.Open("./png-format.png")
-      if err != nil {
-        panic(err)
-      }
-      p, err := ParsePng(open)
-      if err != nil {
-        panic(err)
-      }
-      c := &CustomChunkParse{}
-      err = p.ParseChunk(c)
-      if err != nil {
-        panic(err)
-       }
-    }
+
+    p, err := ParsePng(open) // ... error handling
+    c := &CustomChunkParse{}
+    err = p.ParseChunk(c)    // consumed, retrievable via GetOtherChunkByName
+
+```
 
 
-```  
+---
+
+# Png Struct
 
 
----  
-# Png Struct   
-
-  
   ![png-format.png](png-format.png)
-   
 
----  
+
+---
 ## Benchmark
 
-compare with the standard library `image/png` (benchtime 2s, win/amd64, sha same machine):
-  
+compare with the standard library `image/png` (benchtime 2s, win/amd64, same machine):
+
 | | simple_png | std lib |
 |---|---|---|
 | demo.png (256×81 rgb) **decode** | 277 µs | 205 µs |
@@ -205,9 +223,24 @@ compare with the standard library `image/png` (benchtime 2s, win/amd64, sha same
 
 `IDATsToColor` decodes the standard image types (`*image.Gray`, `*image.Gray16`, `*image.RGBA`, `*image.RGBA64`, `*image.NRGBA`, `*image.NRGBA64`, `*image.Paletted`, matching the jpeg/png standard decoder conventions), so the result is a fully compliant `image.Image` and works with `draw` or any pipeline that accepts `image.Image`.
 
-  
----  
+
+---
+## Concurrency
+
+Parsing with separate `Png` instances (one `ParsePng` per goroutine) is fully
+concurrency safe. On a single instance, the readers (`RawChunks`, `RawChunkByName`,
+`GetOtherChunkByName`, `IDATsToColor`, `WriteTo`) and the editing methods
+(`ParseChunk`, `AddRawChunk`, `DeleteRawChunk`, `ReplaceImage`) are guarded by an
+internal RWMutex, so mixed concurrent read/write use of one instance is also
+safe. One rule to remember: the `Parse` callback of a custom chunk passed to
+`ParseChunk` must not call back into the same `Png` instance (an RWMutex is not
+reentrant). Everything is verified with `go test -race` stress tests.
+
+
+---
 ## TODO:
- - dedicated structs for eXIf / iCCP / sRGB chunks (they are exposed raw meanwhile)
- - Adam7 interlace while encoding
- - FilterNone + zlib "no compression" fast path benchmark tuning
+ - encoder performance tuning (reduce allocations of the filter heuristic)
+ - CI workflow (linux race tests)
+
+
+---
