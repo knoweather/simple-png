@@ -267,13 +267,13 @@ This project is built with heavy help of AI coding agents:
 of development possible.
 
 Code authorship, measured by commit authorship net lines of `*.go`
-files (project baseline vs AI increment):
+files (project baseline 986 vs AI increment 4167):
 
 ```mermaid
 pie showData
-    title Code authorship by commits (net lines of *.go)
-    "Human (project baseline)" : 986
-    "GLM-5.3 Flash (AI)" : 4167
+    title Code authorship
+    "Human" : 19
+    "AI" : 81
 ```
 
 **81%** of the current Go code was written by AI, but verified every bit as

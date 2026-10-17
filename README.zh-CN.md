@@ -254,13 +254,13 @@ go get github.com/XC-Zero/simple-png
 [OpenCode](https://opencode.ai) 提供的免费额度，促成了这一轮开发。
 
 代码占比，按提交口径统计 `*.go` 文件的净行数
-（项目基线 vs AI 增量）：
+（项目基线 986 行 vs AI 增量 4167 行）：
 
 ```mermaid
 pie showData
-    title 代码行数占比（按提交统计 *.go 净行数）
-    "人类（项目基线）" : 986
-    "GLM-5.3 Flash（AI）" : 4167
+    title 代码行数占比
+    "人类" : 19
+    "AI" : 81
 ```
 
 当前 Go 代码 **81%** 由 AI 编写，但验证同样硬核：每轮迭代都在 Windows 上跑
