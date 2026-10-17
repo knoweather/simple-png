@@ -316,7 +316,13 @@ func (p *Png) paletteAlpha(index int) uint8 {
 //
 // tRNS simple transparency is applied to grayscale, truecolor and palette
 // images. Adam7 interlaced images are supported.
+//
+// The pixel decode runs under the internal read lock: it is safe to decode
+// concurrently with other readers of the same instance, while editing
+// methods block until the decode has finished.
 func (p *Png) IDATsToColor() (image.Image, error) {
+	p.RLock()
+	defer p.RUnlock()
 	if p.IHDR == nil || len(p.IDATs) == 0 {
 		return nil, errors.New("png is not parsed or has no IDAT chunks")
 	}

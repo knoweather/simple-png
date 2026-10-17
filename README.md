@@ -1,10 +1,33 @@
 # Simple-png
 
 ### pure go png parse
- 
- 
 
 ### [PNG (Portable Network Graphics) Specification](https://www.w3.org/TR/PNG-Chunks.html)
+
+## Install
+
+```
+go get github.com/XC-Zero/simple-png
+```
+
+and import it:
+
+```go
+
+	import "github.com/XC-Zero/simple-png"
+
+```
+
+## Concurrency
+
+Parsing with separate `Png` instances (one `ParsePng` per goroutine) is fully
+concurrency safe. On a single instance, the readers (`RawChunks`, `RawChunkByName`,
+`GetOtherChunkByName`, `IDATsToColor`, `WriteTo`) and the editing methods
+(`ParseChunk`, `AddRawChunk`, `DeleteRawChunk`, `ReplaceImage`) are guarded by an
+internal RWMutex, so mixed concurrent read/write use of one instance is also
+safe. One rule to remember: the `Parse` callback of a custom chunk passed to
+`ParseChunk` must not call back into the same `Png` instance (an RWMutex is not
+reentrant). Everything is verified with `go test -race` stress tests.
 
 ```go
 

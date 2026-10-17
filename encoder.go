@@ -95,7 +95,12 @@ func Encode(img image.Image, w io.Writer, extra ...RawChunk) (int64, error) {
 // image must match the color type and bit depth of the file (any size is
 // allowed): the IHDR and the reported image dimensions are updated. Use it
 // to replace the pixels of an existing file without losing its metadata.
+// The whole operation runs under the internal write lock, so it is safe to
+// call concurrently with the other editing methods and the readers of the
+// same instance.
 func (p *Png) ReplaceImage(img image.Image) error {
+	p.Lock()
+	defer p.Unlock()
 	if p.IHDR == nil {
 		return errors.New("png is not parsed")
 	}

@@ -134,10 +134,17 @@ func (p *Png) markOrigConsumed(c *chunk) {
 // OtherChunk and can be retrieved later with GetOtherChunkByName.
 // If no matching chunk exists, chunkNotFoundErr is returned and nothing is
 // modified.
+//
+// The whole operation runs under the internal write lock, so concurrent
+// ParseChunk / AddRawChunk / DeleteRawChunk / WriteTo calls on the same
+// instance are serialized. The Parse callback of the given chunk must not
+// call back into the same Png instance (a RWMutex is not reentrant).
 func (p *Png) ParseChunk(c ChunkParse, notSave ...bool) error {
-	p.Do(func() {
+	p.Lock()
+	defer p.Unlock()
+	if p.OtherChunk == nil {
 		p.OtherChunk = make(map[ChunkName][]ChunkParse)
-	})
+	}
 	for i, cur := range p.chunks {
 		if cur == nil || ChunkName(cur.code[:]) != c.ChunkName() {
 			continue
@@ -149,9 +156,7 @@ func (p *Png) ParseChunk(c ChunkParse, notSave ...bool) error {
 		p.chunks = append(p.chunks[:i], p.chunks[i+1:]...)
 		p.markOrigConsumed(cur)
 		if !(len(notSave) > 0 && notSave[0]) {
-			p.Lock()
 			p.OtherChunk[c.ChunkName()] = append(p.OtherChunk[c.ChunkName()], c)
-			p.Unlock()
 		}
 		return nil
 	}
@@ -352,6 +357,8 @@ type RawChunk struct {
 // order they appear in the file. Use this for chunk types the library does
 // not decode natively yet, like eXIf, sRGB or iCCP.
 func (p *Png) RawChunks() []RawChunk {
+	p.RLock()
+	defer p.RUnlock()
 	out := make([]RawChunk, 0, len(p.chunks))
 	for _, c := range p.chunks {
 		out = append(out, RawChunk{
@@ -367,6 +374,8 @@ func (p *Png) RawChunks() []RawChunk {
 // given type, for use cases like reading XMP (iTXt, parsed natively) or EXIF
 // (eXIf) metadata that has no dedicated struct yet.
 func (p *Png) RawChunkByName(name ChunkName) ([]byte, bool) {
+	p.RLock()
+	defer p.RUnlock()
 	for _, c := range p.chunks {
 		if ChunkName(c.code[:]) == name {
 			return c.data, true
@@ -377,8 +386,11 @@ func (p *Png) RawChunkByName(name ChunkName) ([]byte, bool) {
 
 // DeleteRawChunk removes every remaining chunk of the given type from the
 // stream and returns how many chunks were removed. A WriteTo afterwards
-// writes the stream without those chunks.
+// writes the stream without those chunks. It is safe to call concurrently
+// with the other editing methods and the readers of the same instance.
 func (p *Png) DeleteRawChunk(name ChunkName) int {
+	p.Lock()
+	defer p.Unlock()
 	var rest []*chunk
 	for _, c := range p.chunks {
 		if ChunkName(c.code[:]) == name {
@@ -402,8 +414,12 @@ func (p *Png) DeleteRawChunk(name ChunkName) int {
 // IHDR, IDAT or IEND chunks with it.
 // The CRC is computed over the given data and the chunk appears as a raw
 // chunk (see RawChunks) and in WriteTo output. Use it e.g. with
-// NewITXTChunk to embed XMP metadata into an untouched file.
+// NewITXTChunk to embed XMP metadata into an untouched file. It is safe to
+// call concurrently with the other editing methods and the readers of the
+// same instance.
 func (p *Png) AddRawChunk(name ChunkName, data []byte) error {
+	p.Lock()
+	defer p.Unlock()
 	if len(name) != 4 {
 		return errors.Errorf("invalid chunk name %q", string(name))
 	}

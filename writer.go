@@ -56,10 +56,17 @@ func (cw *chunkWriter) writeChunk(name ChunkName, data []byte) error {
 // Note: the compressed text chunks (zTXt and iTXt with the compression flag
 // set) are preserved byte for byte unless their Text field was modified,
 // in which case they are re-compressed with the default zlib level.
+//
+// Reading is guarded by the internal read lock: it is safe to write back
+// while other goroutines read metadata through RawChunks /
+// GetOtherChunkByName, while concurrent writes on the same instance are
+// serialized with the editing methods.
 func (p *Png) WriteTo(w io.Writer) (int64, error) {
 	if p.IHDR == nil {
 		return 0, errors.New("png is not parsed")
 	}
+	p.RLock()
+	defer p.RUnlock()
 	cw := &chunkWriter{w: w}
 	if err := cw.write(pngHeaderBytes); err != nil {
 		return cw.n, err
