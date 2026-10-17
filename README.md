@@ -1,5 +1,8 @@
 # simple-png
 
+> [!NOTE]
+> 🚀 **Initial release, canary testing in progress.** If you hit any problem, please open an [issue](https://github.com/knoweather/simple-png/issues)!
+
 **English** | [简体中文](./README.zh-CN.md)
 
 A pure Go PNG library working at the chunk level: parse, inspect, edit and

@@ -1,5 +1,8 @@
 # simple-png
 
+> [!NOTE]
+> 🚀 **首次发版，灰度测试中。** 有任何问题或建议，欢迎提 [issue](https://github.com/knoweather/simple-png/issues)！
+
 [English](./README.md) | **简体中文**
 
 一个在 chunk 层面工作的纯 Go PNG 库：解析、检查、修改并回写 PNG 数据流，
