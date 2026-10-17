@@ -246,6 +246,29 @@ go get github.com/XC-Zero/simple-png
 
 
 ---
+## AI 加成
+
+本项目在 AI 编程助手深度参与下完成：
+
+**Powered by [GLM-5.3 Flash](https://z.ai)** — 特别感谢
+[OpenCode](https://opencode.ai) 提供的免费额度，促成了这一轮开发。
+
+代码占比，按提交口径统计 `*.go` 文件的净行数
+（项目基线 vs AI 增量）：
+
+```mermaid
+pie showData
+    title 代码行数占比（按提交统计 *.go 净行数）
+    "人类（项目基线）" : 986
+    "GLM-5.3 Flash（AI）" : 4167
+```
+
+当前 Go 代码 **81%** 由 AI 编写，但验证同样硬核：每轮迭代都在 Windows 上跑
+51 项测试 + `go vet`，并在 Linux 上完整跑 `-race`。以上数字直接来自
+`git diff --shortstat`，不含任何目测水分。
+
+
+---
 ## TODO:
  - 编码器性能调优（减少滤波启发式的内存分配）
  - CI workflow（linux race 测试）

@@ -258,6 +258,31 @@ reentrant). Everything is verified with `go test -race` stress tests.
 
 
 ---
+## AI powered
+
+This project is built with heavy help of AI coding agents:
+
+**Powered by [GLM-5.3 Flash](https://z.ai)** — special thanks to
+[OpenCode](https://opencode.ai) for the free token quota that made this round
+of development possible.
+
+Code authorship, measured by commit authorship net lines of `*.go`
+files (project baseline vs AI increment):
+
+```mermaid
+pie showData
+    title Code authorship by commits (net lines of *.go)
+    "Human (project baseline)" : 986
+    "GLM-5.3 Flash (AI)" : 4167
+```
+
+**81%** of the current Go code was written by AI, but verified every bit as
+hard: 51 tests plus `go vet` on Windows and a full `-race` run on Linux for
+every iteration. The numbers above come straight from
+`git diff --shortstat`, no eyeballing involved.
+
+
+---
 ## TODO:
  - encoder performance tuning (reduce allocations of the filter heuristic)
  - CI workflow (linux race tests)
