@@ -22,14 +22,14 @@
 ## 安装
 
 ```
-go get github.com/XC-Zero/simple-png
+go get github.com/knoweather/simple-png
 ```
 
 然后导入：
 
 ```go
 
-	import "github.com/XC-Zero/simple-png"
+	import "github.com/knoweather/simple-png"
 
 ```
 

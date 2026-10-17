@@ -26,14 +26,14 @@ identical** — plus a full image encoder with filter/compression control.
 ## Install
 
 ```
-go get github.com/XC-Zero/simple-png
+go get github.com/knoweather/simple-png
 ```
 
 and import it:
 
 ```go
 
-	import "github.com/XC-Zero/simple-png"
+	import "github.com/knoweather/simple-png"
 
 ```
 
