@@ -237,6 +237,39 @@ go get github.com/knoweather/simple-png
 
 
 ---
+## WebAssembly
+
+读取 / 编辑 / 编码同样支持 `GOOS=js GOARCH=wasm`——无 cgo，整模块原样交叉编译。
+`wasm` 包（`//go:build js && wasm` 标签）暴露小型 JS API；入口在 `cmd/pngwasm`：
+
+```bash
+GOOS=js GOARCH=wasm go build -o png.wasm ./cmd/pngwasm
+```
+
+JS 侧胶水来自 `$GOROOT/lib/wasm/wasm_exec.js`：
+
+```js
+globalThis.pngOpen(new Uint8Array(fileBytes))  // "" 或 "error: ..."
+const sum = globalThis.pngSummary()            // 文件头 + 剩余块表 + 文本元数据视图
+sum.itx // iTXt 条目（keyword/text/…——XMP 就在这里）
+const px = globalThis.pngPixels()              // {dtype:"rgba8", width, height, bytes}
+const enc = globalThis.pngEncode(4, 3, rgbaBytes, [{name:"iTXt", data}])
+globalThis.pngSetRawChunk("cust", new Uint8Array([1, 2, 3]))
+globalThis.pngDeleteRawChunk("gAMA")           // 只能删 raw/leftover 块
+const out = globalThis.pngWrite()              // 重新序列化（未改动块逐字节原样）
+globalThis.pngClose()
+```
+
+说明：
+
+- `pngSummary()` 的块表只列**未被原生解析消费**的块（IHDR/IDAT/PLTE/文本块
+  消费进结构体，改由 `idatCount` / `txx` / `itx` 视图上报）
+- `pngDeleteRawChunk` 与 Go 侧 `DeleteRawChunk` 同语义：只能删 raw/leftover
+  块；被消费的文本元数据在回写时原样保留
+- Node 冒烟测试（`node wasm/smoke/smoke.mjs`）覆盖 打开 → 摘要 → 解码 →
+  编码 → 编辑 → 回写 全链路
+
+---
 ## 并发安全
 
 多 goroutine 各自 `ParsePng` 解析（各自独立的 `Png` 实例）完全并发安全。同一个实例上，

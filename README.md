@@ -247,6 +247,41 @@ compare with the standard library `image/png` (benchtime 2s, win/amd64, same mac
 
 
 ---
+## WebAssembly
+
+The reader/editor/encoder also builds for `GOOS=js GOARCH=wasm` — no cgo, so
+the whole module cross-compiles as-is. The `wasm` package (tagged
+`//go:build js && wasm`) exposes a small JS API; `cmd/pngwasm` is the entry point:
+
+```bash
+GOOS=js GOARCH=wasm go build -o png.wasm ./cmd/pngwasm
+```
+
+JS side (glue from `$GOROOT/lib/wasm/wasm_exec.js`):
+
+```js
+globalThis.pngOpen(new Uint8Array(fileBytes))  // "" or "error: ..."
+const sum = globalThis.pngSummary()            // header + leftover chunks + text metadata view
+sum.itx // iTXt entries (keyword/text/… — XMP rides here)
+const px = globalThis.pngPixels()              // {dtype:"rgba8", width, height, bytes}
+const enc = globalThis.pngEncode(4, 3, rgbaBytes, [{name:"iTXt", data}])
+globalThis.pngSetRawChunk("cust", new Uint8Array([1, 2, 3]))
+globalThis.pngDeleteRawChunk("gAMA")           // raw/leftover chunks only
+const out = globalThis.pngWrite()              // re-serialized file (untouched chunks byte-exact)
+globalThis.pngClose()
+```
+
+Notes:
+
+- `pngSummary()`'s chunk table lists the chunks native parsing did **not**
+  consume (IHDR/IDAT/PLTE/text chunks live in typed fields, reported through
+  `idatCount` / `txx` / `itx` views instead)
+- `pngDeleteRawChunk` mirrors `DeleteRawChunk`: only raw/leftover chunks are
+  removable; consumed text metadata survives write back untouched
+- a Node smoke test (`node wasm/smoke/smoke.mjs`) exercises the full open →
+  summary → pixels → encode → edit → write round trip
+
+---
 ## Concurrency
 
 Parsing with separate `Png` instances (one `ParsePng` per goroutine) is fully
