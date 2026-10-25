@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.svg" width="200" alt="戴贝雷帽、从透明棋盘格面板后探身的 Go gopher">
+</p>
+
 # simple-png
 
 > [!NOTE]
@@ -321,3 +325,11 @@ pie showData
 
 
 ---
+
+---
+
+## 署名
+
+Go gopher 由 [Renee French](https://reneefrench.blogspot.com/) 设计，采用
+[CC BY 3.0](https://creativecommons.org/licenses/by/3.0/) 许可；
+[`docs/logo.svg`](docs/logo.svg) 的 logo 是基于该形象的演绎作品。

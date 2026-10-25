@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.svg" width="200" alt="The Go gopher wearing a beret, peeking from behind a transparency checkerboard">
+</p>
+
 # simple-png
 
 > [!NOTE]
@@ -338,3 +342,11 @@ every iteration. The numbers above come straight from
 
 
 ---
+
+---
+
+## Credits
+
+The Go gopher was designed by [Renee French](https://reneefrench.blogspot.com/) and is
+licensed under [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/). The logo in
+[`docs/logo.svg`](docs/logo.svg) is a derivative work based on that design.
