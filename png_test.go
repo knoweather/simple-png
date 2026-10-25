@@ -14,8 +14,12 @@ import (
 	"time"
 )
 
-// chunkBytes builds a png chunk with a correct CRC (using the standard
-// library's crc32 as an independent reference of ours)
+// chunkBytes 构造一个带正确 CRC 的 PNG chunk：长度 + 类型 + 数据 + CRC。
+// CRC 由标准库 hash/crc32 计算，作为本项目 CRC 实现的独立参照。
+//
+// chunkBytes builds a PNG chunk with a correct CRC: length + type + data +
+// CRC. The CRC comes from the standard library hash/crc32, serving as an
+// independent reference for this project's own CRC.
 func chunkBytes(name string, data []byte) []byte {
 	out := make([]byte, 12+len(data))
 	binary.BigEndian.PutUint32(out[:4], uint32(len(data)))
@@ -25,10 +29,21 @@ func chunkBytes(name string, data []byte) []byte {
 	return out
 }
 
+// pngSignature 返回 PNG 文件签名的 8 个字节（规格 11.1）：最高位置 1 的
+// "PNG" 加 CR LF SUB LF。
+//
+// pngSignature returns the 8-byte PNG file signature (spec 11.1): "PNG" with
+// the high bit set, followed by CR LF SUB LF.
 func pngSignature() []byte {
 	return []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
 }
 
+// buildPng 拼出完整 PNG 流：签名 + 给定的 chunk 序列 + 末尾 IEND。
+// 仅为测试构造数据：chunk 的顺序与大小不做合法性检查。
+//
+// buildPng assembles a full PNG stream: the signature, the given chunks in
+// order, and a trailing IEND. It is a test helper: chunk order and sizes are
+// not validated.
 func buildPng(chunks ...[]byte) []byte {
 	out := pngSignature()
 	for _, c := range chunks {
@@ -38,16 +53,29 @@ func buildPng(chunks ...[]byte) []byte {
 	return out
 }
 
+// ihdrBytes 构造 13 字节的 IHDR 数据：宽、高各为 4 字节大端，其后是位深与
+// 颜色类型；压缩、过滤、隔行方法固定为 0。
+//
+// ihdrBytes builds the 13-byte IHDR payload: width and height as 4-byte
+// big-endian values, then bit depth and color type; the compression, filter
+// and interlace methods are fixed at 0.
 func ihdrBytes(w, h uint32, bitDepth, colorType uint8) []byte {
 	var data = make([]byte, 13)
 	binary.BigEndian.PutUint32(data[:4], w)
 	binary.BigEndian.PutUint32(data[4:8], h)
 	data[8] = bitDepth
 	data[9] = colorType
-	// compression, filter and interlace method 0
+	// 压缩、过滤与隔行方法均为 0。
+	// compression, filter and interlace method 0.
 	return data
 }
 
+// compressRaw 用 zlib（RFC 1950）压缩原始数据并返回压缩结果。
+// PNG 的 IDAT 载荷是 zlib 流，而不是裸 deflate 流。
+//
+// compressRaw zlib-compresses (RFC 1950) the raw data and returns the
+// compressed bytes. An IDAT payload is a zlib stream, not a bare deflate
+// stream.
 func compressRaw(data []byte) []byte {
 	var buf bytes.Buffer
 	zw := zlib.NewWriter(&buf)
@@ -56,13 +84,21 @@ func compressRaw(data []byte) []byte {
 	return buf.Bytes()
 }
 
+// idatBytes 把数据封装成一个 IDAT chunk。
+//
+// idatBytes wraps the data in a single IDAT chunk.
 func idatBytes(data []byte) []byte {
 	return chunkBytes("IDAT", data)
 }
 
-// filterRows applies png scanline filters (method 0) to unfiltered scanlines.
-// An encoder knows all the original pixel values, so the predictors can be
-// computed from them directly.
+// filterRows 对未过滤的扫描行施加 PNG 扫描行过滤（方法 0），输出每行带一个
+// 过滤类型字节的数据流。编码器掌握全部原始像素，预测值可直接由原值算出。
+// filters 会按行循环复用，rows 必须非空。
+//
+// filterRows applies png scanline filters (method 0) to unfiltered scanlines
+// and returns a datastream with one filter-type byte per row. An encoder knows
+// all the original pixel values, so the predictors can be computed from them
+// directly. filters cycles repeatedly; rows must be non-empty.
 func filterRows(rows [][]byte, stride, bpp int, filters []byte) []byte {
 	out := make([]byte, 0, len(rows)*(stride+1))
 	prev := make([]byte, stride)
@@ -96,9 +132,15 @@ func filterRows(rows [][]byte, stride, bpp int, filters []byte) []byte {
 	return out
 }
 
+// allFilters 覆盖全部 5 种过滤类型（0-4），按行轮换使用。
+//
+// allFilters covers all five filter types (0-4), cycled per row.
 var allFilters = []byte{0, 1, 2, 3, 4}
 
-// decodeWithStd decodes with the standard library as a reference oracle
+// decodeWithStd 用标准库解码作为参照（oracle），解码失败即 Fatal。
+//
+// decodeWithStd decodes with the standard library as a reference oracle and
+// fails the test on any decode error.
 func decodeWithStd(t *testing.T, data []byte) image.Image {
 	t.Helper()
 	want, err := stdpng.Decode(bytes.NewReader(data))
@@ -108,7 +150,11 @@ func decodeWithStd(t *testing.T, data []byte) image.Image {
 	return want
 }
 
-// assertImageEqual compares two images pixel by pixel
+// assertImageEqual 逐像素比较两幅图像：先比边界框，再比各像素的 RGBA 值，
+// 任一处不同即 Fatal。
+//
+// assertImageEqual compares two images pixel by pixel: the bounds first, then
+// each pixel's RGBA values; any mismatch fails the test.
 func assertImageEqual(t *testing.T, want, got image.Image) {
 	t.Helper()
 	if !got.Bounds().Eq(want.Bounds()) {
@@ -126,7 +172,10 @@ func assertImageEqual(t *testing.T, want, got image.Image) {
 	}
 }
 
-// parseAndDecode parses with our library and decodes to an image
+// parseAndDecode 用本库解析并解码为图像，解析或解码失败即 Fatal。
+//
+// parseAndDecode parses with this library and decodes to an image, failing the
+// test on any parse or decode error.
 func parseAndDecode(t *testing.T, data []byte) image.Image {
 	t.Helper()
 	p, err := ParsePng(bytes.NewReader(data))
@@ -140,6 +189,14 @@ func parseAndDecode(t *testing.T, data []byte) image.Image {
 	return img
 }
 
+// TestParsePng 解析 ./demo.png 并核对字段：256x81、通道数 3、单一 IDAT、
+// 颜色类型 2 位深 8、pHYs（3780）与 tEXt（Software=Snipaste）；
+// 已解析的基础 chunk 会被消费，不应剩下未知 chunk。文件不可读时跳过。
+//
+// TestParsePng parses ./demo.png and verifies its fields: 256x81, 3 channels,
+// a single IDAT, color type 2 with bit depth 8, pHYs (3780) and tEXt
+// (Software=Snipaste). The parsed base chunks are consumed, so no unknown
+// chunks should remain. The test is skipped when the file is unreadable.
 func TestParsePng(t *testing.T) {
 	open, err := os.Open("./demo.png")
 	if err != nil {
@@ -168,7 +225,8 @@ func TestParsePng(t *testing.T) {
 	if len(p.TEXTs) != 1 || p.TEXTs[0].Keyword != "Software" || p.TEXTs[0].Text != "Snipaste" {
 		t.Fatalf("invalid text: %v", p.TEXTs)
 	}
-	// the parsed base chunks are consumed, only unknown chunks remain
+	// 已解析的基础 chunk 会被消费，只剩未知 chunk。
+	// the parsed base chunks are consumed, only unknown chunks remain.
 	var names []ChunkName
 	for _, c := range p.chunks {
 		names = append(names, ChunkName(c.code[:]))
@@ -179,20 +237,42 @@ func TestParsePng(t *testing.T) {
 	log.Println(p.IDATs[0], p.TEXTs[0], p.PHYS)
 }
 
+// CustomChunkParse 演示自定义 chunk 解析器：声明自己消费 sPLT 并把载荷存进
+// Data。它必须实现 RawChunkParser：ChunkName 返回要消费的 chunk 名，
+// Parse 接收原始 chunk。
+//
+// CustomChunkParse demonstrates a custom chunk parser: it declares that it
+// consumes sPLT chunks and stores the payload in Data. It must implement
+// RawChunkParser: ChunkName names the chunk to consume, Parse receives the raw
+// chunk.
 type CustomChunkParse struct {
 	Data []byte
 }
 
+// ChunkName 声明本解析器消费 sPLT chunk。
+//
+// ChunkName declares that this parser consumes sPLT chunks.
 func (c *CustomChunkParse) ChunkName() ChunkName {
 	return ChunkName("sPLT")
 }
 
+// Parse 记录原始 chunk 的数据载荷（不含长度、类型与 CRC 字段）。
+//
+// Parse records the raw payload of the chunk (without the length, type and CRC
+// fields).
 func (c *CustomChunkParse) Parse(chunk RawChunk) error {
 	c.Data = chunk.Data[:]
 	return nil
 }
 
+// TestCustomChunk 验证库原生不解码的 chunk 会先保持为原始 chunk，
+// 直到 ParseChunk 交给自定义解析器消费，之后可按名取回。
+//
+// TestCustomChunk verifies that a chunk the library does not decode natively
+// stays raw until a custom ParseChunk call consumes it, after which it can be
+// fetched by name.
 func TestCustomChunk(t *testing.T) {
+	// 构造库不原生解码的 sPLT chunk：在自定义 ParseChunk 消费它之前保持原始形态。
 	// a sPLT chunk the library does not decode natively: it stays raw
 	// until a custom ParseChunk call consumes it
 	data := buildPng(
@@ -213,7 +293,8 @@ func TestCustomChunk(t *testing.T) {
 		t.Fatalf("expected only the unknown sPLT chunk, got %v", unknown)
 	}
 
-	// parse the custom chunk and get it back by name
+	// 用自定义解析器解析该 chunk，再按名取回。
+	// parse the custom chunk and get it back by name.
 	c := &CustomChunkParse{}
 	if err = p.ParseChunk(c); err != nil {
 		t.Fatalf("custom chunk parse failed: %v", err)
@@ -227,6 +308,12 @@ func TestCustomChunk(t *testing.T) {
 	}
 }
 
+// TestIDATsToColorFiles 对 demo.png 与 png-format.png 做端到端校验：
+// 本库解码出的图像必须与标准库逐像素一致。文件不可读时跳过。
+//
+// TestIDATsToColorFiles end-to-end checks demo.png and png-format.png: the
+// image decoded by this library must match the standard library pixel for
+// pixel. Unreadable files are skipped.
 func TestIDATsToColorFiles(t *testing.T) {
 	for _, name := range []string{"./demo.png", "./png-format.png"} {
 		data, err := os.ReadFile(name)
@@ -240,6 +327,12 @@ func TestIDATsToColorFiles(t *testing.T) {
 	}
 }
 
+// TestDecodeGray8AllFilters 构造 9x5 灰度图（位深 8），5 种过滤类型轮换使用，
+// 与标准库逐像素对比，并额外校验 *image.Gray 的 Pix 缓冲内容。
+//
+// TestDecodeGray8AllFilters builds a 9x5 grayscale image (bit depth 8) with all
+// five filter types cycled, compares pixel by pixel against the standard
+// library, and additionally checks the *image.Gray Pix buffer.
 func TestDecodeGray8AllFilters(t *testing.T) {
 	width, height := 9, 5
 	var rows [][]byte
@@ -272,6 +365,12 @@ func TestDecodeGray8AllFilters(t *testing.T) {
 	}
 }
 
+// TestDecodeSubByteDepths 对位深 1/2/4 的灰度图逐一验证：样本按最高有效位优先
+// 打包，解码结果与标准库一致，且低位深样本按规格放大到 8 位。
+//
+// TestDecodeSubByteDepths verifies grayscale bit depths 1, 2 and 4 one by one:
+// samples are packed most significant bit first, the decoded image matches the
+// standard library, and sub-8-bit samples are scaled up per the spec.
 func TestDecodeSubByteDepths(t *testing.T) {
 	for _, depth := range []uint8{1, 2, 4} {
 		width, height := 16, 2
@@ -283,7 +382,8 @@ func TestDecodeSubByteDepths(t *testing.T) {
 			row := make([]byte, stride)
 			for x := 0; x < width; x++ {
 				v := uint16((x*3 + y*5) & (1<<depth - 1))
-				// pack the sample most significant bit first
+				// 按最高有效位优先打包样本。
+				// pack the sample most significant bit first.
 				pos := x * int(depth)
 				shift := uint(8 - pos%8 - int(depth))
 				row[pos>>3] |= byte(v << shift)
@@ -301,8 +401,15 @@ func TestDecodeSubByteDepths(t *testing.T) {
 	}
 }
 
+// TestDecodeTruecolorTRNS 构造 2x2 真彩色图（位深 8），tRNS 把第一个像素的
+// 颜色标记为透明：命中像素应完全透明，其余像素保持不透明。
+//
+// TestDecodeTruecolorTRNS builds a 2x2 truecolor image (bit depth 8) whose
+// tRNS marks the first pixel's color as transparent: the matching pixel must
+// be fully transparent while the others stay opaque.
 func TestDecodeTruecolorTRNS(t *testing.T) {
-	// 2x2 rgb d8, tRNS marks the color of the first pixel transparent
+	// 2x2 真彩色位深 8，tRNS 把第一个像素的颜色标记为透明。
+	// 2x2 rgb d8, tRNS marks the color of the first pixel transparent.
 	width, height := 2, 2
 	var rows [][]byte
 	pixels := []uint8{
@@ -313,8 +420,9 @@ func TestDecodeTruecolorTRNS(t *testing.T) {
 		rows = append(rows, pixels[y*width*3:(y+1)*width*3])
 	}
 	var trns = make([]byte, 6)
+	// tRNS 的采样值即使在 8 位图像里也放在 16 位容器中，10/20/30 因此存为 10*0x101 之类的形式（按规格放大 8 位采样）。
 	// tRNS sample values live in a 16-bit container even for 8-bit images,
-	// so 10/20/30 are stored as 10*0x101 etc (the 8-bit sample scaled per spec)
+	// so 10/20/30 are stored as 10*0x101 etc (the 8-bit sample scaled per spec).
 	binary.BigEndian.PutUint16(trns[0:2], 10*0x101)
 	binary.BigEndian.PutUint16(trns[2:4], 20*0x101)
 	binary.BigEndian.PutUint16(trns[4:6], 30*0x101)
@@ -335,8 +443,15 @@ func TestDecodeTruecolorTRNS(t *testing.T) {
 	}
 }
 
+// TestDecodePaletteSubByteTRNS 构造 4x2 调色板图（位深 4、4 种颜色），tRNS
+// 给出 4 个 alpha 值；解码结果必须与标准库逐像素一致。
+//
+// TestDecodePaletteSubByteTRNS builds a 4x2 palette image (bit depth 4, four
+// colors) with a tRNS listing four alpha values; the decoded image must match
+// the standard library pixel for pixel.
 func TestDecodePaletteSubByteTRNS(t *testing.T) {
-	// 4x2 palette image, bit depth 4, 4 colors, tRNS with 4 alphas
+	// 4x2 调色板图，位深 4，4 种颜色，tRNS 带 4 个 alpha 值。
+	// 4x2 palette image, bit depth 4, 4 colors, tRNS with 4 alphas.
 	width, height := 4, 2
 	stride := (width*int(4) + 7) / 8
 	bpp := 1
@@ -366,8 +481,13 @@ func TestDecodePaletteSubByteTRNS(t *testing.T) {
 	assertImageEqual(t, want, got)
 }
 
+// TestDecodeGrayAlpha 验证 3x1 灰度加 alpha 图（颜色类型 4、位深 8）的解码。
+//
+// TestDecodeGrayAlpha verifies the decode of a 3x1 grayscale-with-alpha image
+// (color type 4, bit depth 8).
 func TestDecodeGrayAlpha(t *testing.T) {
-	// 3x1 gray+alpha d8
+	// 3x1 灰度加 alpha，位深 8。
+	// 3x1 gray+alpha d8.
 	rows := [][]byte{{10, 200, 30, 100, 50, 255}}
 	data := buildPng(
 		chunkBytes("IHDR", ihdrBytes(3, 1, 8, 4)),
@@ -378,8 +498,15 @@ func TestDecodeGrayAlpha(t *testing.T) {
 	assertImageEqual(t, want, got)
 }
 
+// TestDecodeRGBA16MultiIDAT 验证 2x2 RGBA 图（位深 16）在压缩流被拆成 3 个
+// IDAT chunk 时仍能正确重组：多个 IDAT 必须按序拼接后再解压。
+//
+// TestDecodeRGBA16MultiIDAT verifies that a 2x2 RGBA image (bit depth 16) still
+// reassembles when its compressed stream is split into 3 IDAT chunks: multiple
+// IDATs must be concatenated in order before inflating.
 func TestDecodeRGBA16MultiIDAT(t *testing.T) {
-	// 2x2 rgba d16, the compressed stream split into 3 idat chunks
+	// 2x2 RGBA 位深 16，压缩流拆成 3 个 IDAT chunk。
+	// 2x2 rgba d16, the compressed stream split into 3 idat chunks.
 	width, height := 2, 2
 	var rows [][]byte
 	for y := 0; y < height; y++ {
@@ -406,8 +533,15 @@ func TestDecodeRGBA16MultiIDAT(t *testing.T) {
 	assertImageEqual(t, want, got)
 }
 
+// TestDecodeGray16TRNS 验证 2x1 灰度图（位深 16）：tRNS 把某个灰度级标记为
+// 透明，命中像素应透明，其余像素保持不透明。
+//
+// TestDecodeGray16TRNS verifies a 2x1 grayscale image (bit depth 16): tRNS
+// marks one gray level transparent, so the matching pixel turns transparent
+// while the other stays opaque.
 func TestDecodeGray16TRNS(t *testing.T) {
-	// 2x1 gray d16, tRNS marks the first gray level transparent
+	// 2x1 灰度位深 16，tRNS 把第一个灰度级标记为透明。
+	// 2x1 gray d16, tRNS marks the first gray level transparent.
 	width := 2
 	rows := [][]byte{{0x12, 0x34, 0xAB, 0xCD}}
 	var trns = make([]byte, 2)
@@ -422,12 +556,18 @@ func TestDecodeGray16TRNS(t *testing.T) {
 	assertImageEqual(t, want, got)
 }
 
+// TestZTXTAndBKGD 验证 zTXt（zlib 压缩文本）解压回原文，并覆盖 bKGD 的三种
+// 载荷长度：1 字节调色板索引、2 字节灰度、6 字节 RGB。
+//
+// TestZTXTAndBKGD verifies that zTXt (zlib-compressed text) inflates back to
+// the original string, and covers the three bKGD payload sizes: 1-byte palette
+// index, 2-byte gray and 6-byte RGB.
 func TestZTXTAndBKGD(t *testing.T) {
 	compressed := compressRaw([]byte("compressed text payload"))
 	var ztxt []byte
 	ztxt = append(ztxt, []byte("Comment")...)
 	ztxt = append(ztxt, 0x00)
-	ztxt = append(ztxt, 0) // compression method 0
+	ztxt = append(ztxt, 0) // 压缩方法 0 / compression method 0
 	ztxt = append(ztxt, compressed...)
 
 	var bkgd1 = []byte{3}
@@ -456,7 +596,8 @@ func TestZTXTAndBKGD(t *testing.T) {
 		t.Fatalf("invalid bkgd: %+v", p.BKGD)
 	}
 
-	// 2 byte bkgd (gray)
+	// 2 字节 bKGD（灰度）。
+	// 2 byte bkgd (gray).
 	data = buildPng(
 		chunkBytes("IHDR", ihdrBytes(1, 1, 8, 0)),
 		chunkBytes("bKGD", bkgd2),
@@ -470,7 +611,8 @@ func TestZTXTAndBKGD(t *testing.T) {
 		t.Fatalf("invalid bkgd: %+v", p.BKGD)
 	}
 
-	// 6 byte bkgd (rgb)
+	// 6 字节 bKGD（RGB）。
+	// 6 byte bkgd (rgb).
 	data = buildPng(
 		chunkBytes("IHDR", ihdrBytes(1, 1, 8, 2)),
 		chunkBytes("bKGD", bkgd6),
@@ -485,6 +627,11 @@ func TestZTXTAndBKGD(t *testing.T) {
 	}
 }
 
+// TestTEXTPreservesWhitespace 验证 tEXt 的文本值原样保留首尾空白字符：
+// 解析端不得修剪或改写它们。
+//
+// TestTEXTPreservesWhitespace verifies that a tEXt value keeps its leading and
+// trailing whitespace verbatim: the parser must not trim or rewrite it.
 func TestTEXTPreservesWhitespace(t *testing.T) {
 	var text []byte
 	text = append(text, []byte("Title")...)
@@ -504,8 +651,14 @@ func TestTEXTPreservesWhitespace(t *testing.T) {
 	}
 }
 
+// TestHISTAndPLTE 验证 PLTE 的颜色条目与 hIST 的逐条目频率（uint16 大端）
+// 都能正确解析。
+//
+// TestHISTAndPLTE verifies that the PLTE color entries and the per-entry hIST
+// frequencies (big-endian uint16) both parse correctly.
 func TestHISTAndPLTE(t *testing.T) {
-	// hIST: 3 palette entries, 3 uint16 frequencies
+	// hIST：3 个调色板条目，3 个 uint16 频率值。
+	// hIST: 3 palette entries, 3 uint16 frequencies.
 	var hist []byte
 	for _, v := range []uint16{1, 65535, 342} {
 		var b [2]byte
@@ -530,19 +683,30 @@ func TestHISTAndPLTE(t *testing.T) {
 	}
 }
 
+// TestCRCCorruption 验证 CRC 语义：默认关闭校验时，数据被篡改的辅助 chunk
+// 照常解析（它不参与 zlib 流）；显式开启校验后，同一文件必须被拒绝。
+//
+// TestCRCCorruption verifies the CRC semantics: with verification off (the
+// default), an ancillary chunk with corrupted data still parses because it is
+// not part of the zlib stream; with verification turned on, the same file must
+// be rejected.
 func TestCRCCorruption(t *testing.T) {
-	// a corrupted ancillary chunk cannot affect the zlib stream
+	// 损坏的辅助 chunk 不会波及 zlib 流。
+	// a corrupted ancillary chunk cannot affect the zlib stream.
 	data := buildPng(
 		chunkBytes("IHDR", ihdrBytes(1, 1, 8, 0)),
 		chunkBytes("cst1", []byte{0xA5, 0x5A, 0x01}),
 		idatBytes(compressRaw([]byte{0, 0, 0})),
 	)
-	// corrupt a byte inside the data of the ancillary chunk
-	// signature(8) + IHDR(12+13) + 8 byte chunk header
+	// 翻转辅助 chunk 数据区中的一个字节；偏移这样算：
+	// 签名(8) + IHDR(12+13) + 8 字节 chunk 头。
+	// corrupt a byte inside the data of the ancillary chunk;
+	// signature(8) + IHDR(12+13) + 8 byte chunk header.
 	customStart := 8 + (12 + 13)
 	data[customStart+8] ^= 0xFF
 
-	// default: CRC verification is off, the file still parses
+	// 默认关闭 CRC 校验：文件仍能解析。
+	// default: CRC verification is off, the file still parses.
 	p, err := ParsePng(bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("expected a successful parse with crc off: %v", err)
@@ -551,14 +715,22 @@ func TestCRCCorruption(t *testing.T) {
 		t.Fatalf("expected 1 raw chunk, got %d", len(p.RawChunks()))
 	}
 
-	// opt-in: the same file must be rejected
+	// 显式开启校验（opt-in）：同一文件必须被拒绝。
+	// opt-in: the same file must be rejected.
 	if _, err = ParsePng(bytes.NewReader(data), true); err == nil {
 		t.Fatal("expected a crc error when verification is on")
 	}
 }
 
+// TestInvalidIHDR 验证非法 IHDR 一律报错：宽或高为 0、颜色类型越界，
+// 以及该颜色类型不允许的位深组合。
+//
+// TestInvalidIHDR verifies that invalid IHDR values are rejected: zero width or
+// height, an out-of-range color type, and a bit depth that the color type does
+// not allow.
 func TestInvalidIHDR(t *testing.T) {
-	// zero size
+	// 尺寸为零（此处是宽度为 0）。
+	// zero size (width 0 here).
 	data := buildPng(
 		chunkBytes("IHDR", ihdrBytes(0, 10, 8, 0)),
 		idatBytes(compressRaw([]byte{0})),
@@ -567,20 +739,28 @@ func TestInvalidIHDR(t *testing.T) {
 		t.Fatal("expected an error for a zero width")
 	}
 
-	// invalid color type
+	// 颜色类型 5 非法。
+	// color type 5 is invalid.
 	if err := (&IHDR{Width: 1, Height: 1, BitDepth: 8, ColorType: 5}).Validate(); err == nil {
 		t.Fatal("expected an error for color type 5")
 	}
 
-	// invalid bit depth for the color type
+	// 该颜色类型不允许此位深：颜色类型 6 不接受位深 4。
+	// invalid bit depth for the color type: color type 6 rejects bit depth 4.
 	if err := (&IHDR{Width: 1, Height: 1, BitDepth: 4, ColorType: 6}).Validate(); err == nil {
 		t.Fatal("expected an error for bit depth 4 in color type 6")
 	}
 }
 
+// TestTIME 验证 tIME 的解析：7 字节大端载荷解析为各时间字段，ToTime 转成
+// UTC 的 time.Time；不足 7 字节必须报错而不是 panic。
+//
+// TestTIME verifies tIME parsing: the 7-byte big-endian payload is parsed into
+// the time fields and ToTime converts them to a UTC time.Time; data shorter
+// than 7 bytes must return an error instead of panicking.
 func TestTIME(t *testing.T) {
 	var data []byte
-	data = append(data, []byte{0x07, 0xDB}...) // 2011
+	data = append(data, []byte{0x07, 0xDB}...) // 年份 2011 / year 2011
 	data = append(data, 12, 25, 18, 30, 59)
 	c := RawChunk{Data: data}
 	tm := &TIME{}
@@ -594,12 +774,16 @@ func TestTIME(t *testing.T) {
 		t.Fatalf("invalid unix time: %v", tm.ToTime())
 	}
 
-	// short data must not panic
+	// 数据过短时不能 panic。
+	// short data must not panic.
 	if err := tm.Parse(RawChunk{Data: data[:3]}); err == nil {
 		t.Fatal("expected an error for short time data")
 	}
 }
 
+// BenchmarkDecode 对比本库与标准库 image/png 的完整流程（解析 + 像素解码），
+// 标准库解码器作为参照基准。
+//
 // BenchmarkDecode compares a full parse + pixel decode between this library
 // and the standard library image/png decoder as a reference.
 func BenchmarkDecode(b *testing.B) {
@@ -631,6 +815,9 @@ func BenchmarkDecode(b *testing.B) {
 	}
 }
 
+// BenchmarkParse 只测量 chunk 解析层（不做像素解码），
+// 以标准库的 png.Decode 作为最接近的可比基线。
+//
 // BenchmarkParse measures only the chunk parsing layer (no pixel decode),
 // with png.Decode of the standard library as the closest comparable baseline.
 func BenchmarkParse(b *testing.B) {
@@ -658,15 +845,23 @@ func BenchmarkParse(b *testing.B) {
 	}
 }
 
+// TestITXT 验证 iTXt 的未压缩与压缩两种形态：关键字、压缩标志、语言标签、
+// 译名关键字（UTF-8）与文本逐字段核对，压缩体按 zlib 解回原文。
+//
+// TestITXT verifies both the uncompressed and compressed forms of iTXt: the
+// keyword, compression flag, language tag, translated keyword (UTF-8) and text
+// are checked field by field, and a compressed body inflates back to the
+// original string.
 func TestITXT(t *testing.T) {
-	// uncompressed iTXt as commonly used for XMP metadata
+	// 未压缩的 iTXt，常见于 XMP 元数据。
+	// uncompressed iTXt as commonly used for XMP metadata.
 	var itxt []byte
 	itxt = append(itxt, []byte("XML:com.adobe.xmp")...)
-	itxt = append(itxt, 0x00, 0, 0, 0x00)                       // keyword, flag 0, method 0, null
-	itxt = append(itxt, []byte("x-default")...)                 // language tag
-	itxt = append(itxt, 0x00)                                   // null
-	itxt = append(itxt, []byte("XMP 元数据标题")...)                // translated keyword (utf-8)
-	itxt = append(itxt, 0x00)                                   // null
+	itxt = append(itxt, 0x00, 0, 0, 0x00)       // 关键字、标志 0、方法 0、空字节 / keyword, flag 0, method 0, null
+	itxt = append(itxt, []byte("x-default")...) // 语言标签 / language tag
+	itxt = append(itxt, 0x00)                   // 空字节 / null
+	itxt = append(itxt, []byte("XMP 元数据标题")...) // 译名关键字（utf-8）/ translated keyword (utf-8)
+	itxt = append(itxt, 0x00)                   // 空字节 / null
 	itxt = append(itxt, []byte("<x:xmpmeta xmlns:x='adobe:ns:meta/'></x:xmpmeta>")...)
 
 	data := buildPng(
@@ -687,13 +882,14 @@ func TestITXT(t *testing.T) {
 		t.Fatalf("invalid itxt: %+v", x)
 	}
 
-	// compressed iTXt
+	// 压缩形态的 iTXt。
+	// compressed iTXt.
 	compressed := compressRaw([]byte("compressed itxt body"))
 	var citxt []byte
 	citxt = append(citxt, []byte("Comment")...)
-	citxt = append(citxt, 0x00, 1, 0, 0x00) // keyword, flag 1 (compressed), method 0 (zlib), null
-	citxt = append(citxt, 0x00)             // language tag: ""...
-	citxt = append(citxt, 0x00)             // translated keyword: ""
+	citxt = append(citxt, 0x00, 1, 0, 0x00) // 关键字、标志 1（已压缩）、方法 0（zlib）、空字节 / keyword, flag 1 (compressed), method 0 (zlib), null
+	citxt = append(citxt, 0x00)             // 语言标签为空 / language tag: ""
+	citxt = append(citxt, 0x00)             // 译名关键字为空 / translated keyword: ""
 	citxt = append(citxt, compressed...)
 	data = buildPng(
 		chunkBytes("IHDR", ihdrBytes(1, 1, 8, 0)),
@@ -709,11 +905,19 @@ func TestITXT(t *testing.T) {
 	}
 }
 
+// TestRawChunks 验证库不认识的 chunk 会以原始形态保留：RawChunks 列出其名与
+// 数据，RawChunkByName 按名查询（不存在的名返回 false）。
+//
+// TestRawChunks verifies that chunks unknown to the library are kept raw:
+// RawChunks lists their names and payloads, RawChunkByName fetches one by name,
+// and a missing name reports false.
 func TestRawChunks(t *testing.T) {
-	// sRGB stays in the file as a raw chunk, the standard crc value matches
+	// 未被解析器识别的 sPLT 以原始 chunk 形式留在文件里，CRC 为标准算法值。
+	// the unknown sPLT chunk stays in the file as a raw chunk with the
+	// standard crc value.
 	data := buildPng(
 		chunkBytes("IHDR", ihdrBytes(1, 1, 8, 0)),
-		chunkBytes("sPLT", []byte{0xAB}), // unknown to the parser
+		chunkBytes("sPLT", []byte{0xAB}), // 解析器不认识它 / unknown to the parser
 		idatBytes(compressRaw([]byte{0, 0, 0})),
 	)
 	p, err := ParsePng(bytes.NewReader(data))
@@ -732,6 +936,12 @@ func TestRawChunks(t *testing.T) {
 	}
 }
 
+// TestSRGBStruct 验证 sRGB 的解析与写回：未修改时 MarshalBytes 与输入逐字节
+// 一致；修改渲染意图后写回，重新解析能读到新值。
+//
+// TestSRGBStruct verifies sRGB parsing and write-back: an untouched parse
+// marshals byte for byte identical to the input, and after editing the
+// rendering intent the re-parsed file shows the new value.
 func TestSRGBStruct(t *testing.T) {
 	data := buildPng(
 		chunkBytes("IHDR", ihdrBytes(1, 1, 8, 0)),
@@ -745,7 +955,8 @@ func TestSRGBStruct(t *testing.T) {
 	if p.SRGB == nil || p.SRGB.RenderingIntent != 0 {
 		t.Fatalf("invalid srgb: %+v", p.SRGB)
 	}
-	// untouched: byte for byte write back
+	// 未修改：逐字节写回。
+	// untouched: byte for byte write back.
 	written, err := p.MarshalBytes()
 	if err != nil {
 		t.Fatal(err)
@@ -753,7 +964,8 @@ func TestSRGBStruct(t *testing.T) {
 	if !bytes.Equal(written, data) {
 		t.Fatal("the untouched sRGB chunk was not written back byte for byte")
 	}
-	// modified: the new rendering intent lands in the file
+	// 已修改：新的渲染意图写入文件。
+	// modified: the new rendering intent lands in the file.
 	p.SRGB.RenderingIntent = 2
 	written, err = p.MarshalBytes()
 	if err != nil {
@@ -768,11 +980,18 @@ func TestSRGBStruct(t *testing.T) {
 	}
 }
 
+// TestICCPStruct 验证 iCCP 的解析与写回：名称与 zlib 压缩的 profile 都能还原；
+// 未修改时逐字节一致；替换 profile 后写回时会重新压缩。
+//
+// TestICCPStruct verifies iCCP parsing and write-back: the name and the
+// zlib-compressed profile are restored exactly; an untouched parse marshals
+// byte for byte identical, and a replaced profile is compressed again when
+// written.
 func TestICCPStruct(t *testing.T) {
 	profile := []byte("ICC PROFILE DATA v1")
 	var iccpPayload []byte
 	iccpPayload = append(iccpPayload, []byte("ICC profile")...)
-	iccpPayload = append(iccpPayload, 0x00, 0) // name + null + zlib
+	iccpPayload = append(iccpPayload, 0x00, 0) // 名字 + 空字节 + zlib 压缩 / name + null + zlib
 	iccpPayload = append(iccpPayload, compressRaw(profile)...)
 	data := buildPng(
 		chunkBytes("IHDR", ihdrBytes(1, 1, 8, 0)),
@@ -786,7 +1005,8 @@ func TestICCPStruct(t *testing.T) {
 	if p.ICCP == nil || p.ICCP.Name != "ICC profile" || string(p.ICCP.Profile) != string(profile) {
 		t.Fatalf("invalid iccp: %s, %s", p.ICCP.Name, p.ICCP.Profile)
 	}
-	// untouched: byte for byte write back
+	// 未修改：逐字节写回。
+	// untouched: byte for byte write back.
 	written, err := p.MarshalBytes()
 	if err != nil {
 		t.Fatal(err)
@@ -794,7 +1014,8 @@ func TestICCPStruct(t *testing.T) {
 	if !bytes.Equal(written, data) {
 		t.Fatal("the untouched iCCP chunk was not written back byte for byte")
 	}
-	// a replaced profile is compressed again while writing
+	// 替换后的 profile 在写回时会重新压缩。
+	// a replaced profile is compressed again while writing.
 	p2 := []byte("NEW ICC PROFILE DATA")
 	p.ICCP.Profile = p2
 	written, err = p.MarshalBytes()
@@ -810,9 +1031,16 @@ func TestICCPStruct(t *testing.T) {
 	}
 }
 
+// TestICCAndSRGBBoth 验证同时带 iCCP 与 sRGB 的文件仍能解析：规格禁止二者并存，
+// 但现实文件存在，本库保留两个 chunk 而不是报错。
+//
+// TestICCAndSRGBBoth verifies that a file carrying both iCCP and sRGB still
+// parses: the spec forbids the combination, but such files exist in the wild,
+// so this library keeps both chunks instead of failing.
 func TestICCAndSRGBBoth(t *testing.T) {
+	// 规格禁止二者并存，但这类文件确实存在：继续解析，两个 chunk 都保留。
 	// the spec forbids a combination of both, but such files exist: keep
-	// parsing them, both chunks are preserved
+	// parsing them, both chunks are preserved.
 	profile := []byte("ICC")
 	var iccpPayload []byte
 	iccpPayload = append(iccpPayload, []byte("p")...)
@@ -833,9 +1061,19 @@ func TestICCAndSRGBBoth(t *testing.T) {
 	}
 }
 
+// TestEXIFStruct 构造最小的小端 TIFF 流放入 eXIf chunk 并验证：blob 逐字节保留；
+// Entries 展开 IFD0 与 Exif IFD 的条目（含经偏移解析的有理数）；未修改时逐字节
+// 写回；截断的流报出干净的错误。
+//
+// TestEXIFStruct builds a minimal little-endian TIFF stream inside an eXIf
+// chunk and verifies that the blob is kept byte for byte, Entries lists the
+// IFD0 and Exif IFD entries (including a rational resolved through its offset),
+// an untouched parse marshals byte for byte identical, and a truncated stream
+// returns a clean error.
 func TestEXIFStruct(t *testing.T) {
+	// 手工构造的最小小端 TIFF 流：IFD0 带一个 ASCII 条目和一个指向 Exif IFD 的指针，后者存放一个有理数。
 	// a hand-made minimal little-endian tiff stream: IFD0 with one ASCII
-	// entry and one pointer to the Exif IFD, which holds a rational
+	// entry and one pointer to the Exif IFD, which holds a rational.
 	var tk = binary.LittleEndian
 	var tiff []byte
 	tiff = append(tiff, 'I', 'I')
@@ -861,22 +1099,25 @@ func TestEXIFStruct(t *testing.T) {
 		}
 		return out
 	}
-	// IFD0 at 8 with 2 entries (30 bytes)
+	// IFD0 位于偏移 8，含 2 个条目（共 30 字节）。
+	// IFD0 at 8 with 2 entries (30 bytes).
 	tk.PutUint16(w2[:], 2)
 	tiff = append(tiff, w2[:]...)
 	tiff = append(tiff, putEntry(0x010E, 2, 4, []byte{'H', 'i', '!', 0})...)
-	tk.PutUint32(w4[:], 38) // ExifIFDPointer -> 38
+	tk.PutUint32(w4[:], 38) // ExifIFDPointer 指向 38 / ExifIFDPointer -> 38
 	tiff = append(tiff, putEntry(0x8769, 4, 1, w4[:])...)
-	tk.PutUint32(w4[:], 0) // no linked IFD
+	tk.PutUint32(w4[:], 0) // 没有链接到别的 IFD / no linked IFD
 	tiff = append(tiff, w4[:]...)
-	// Exif IFD at 38 with 1 entry (18 bytes)
+	// Exif IFD 位于偏移 38，含 1 个条目（共 18 字节）。
+	// Exif IFD at 38 with 1 entry (18 bytes).
 	tk.PutUint16(w2[:], 1)
 	tiff = append(tiff, w2[:]...)
-	tk.PutUint32(w4[:], 56) // the rational lives at 56
+	tk.PutUint32(w4[:], 56) // 有理数存放在偏移 56 / the rational lives at 56
 	tiff = append(tiff, putEntry(0x829A, 5, 1, w4[:])...)
 	tk.PutUint32(w4[:], 0)
 	tiff = append(tiff, w4[:]...)
-	// the 1/100 second exposure time
+	// 1/100 秒的曝光时间。
+	// the 1/100 second exposure time.
 	tk.PutUint32(w4[:], 1)
 	tiff = append(tiff, w4[:]...)
 	tk.PutUint32(w4[:], 100)
@@ -901,22 +1142,26 @@ func TestEXIFStruct(t *testing.T) {
 	if len(entries) != 3 {
 		t.Fatalf("expected 3 entries (IFD0 + pointer + Exif IFD), got %d: %+v", len(entries), entries)
 	}
-	// the IFD0 ASCII entry with its inline value
+	// IFD0 的 ASCII 条目及其内联值。
+	// the IFD0 ASCII entry with its inline value.
 	if entries[0].Tag != 0x010E || entries[0].Type != 2 || entries[0].Count != 4 ||
 		string(entries[0].Value) != "Hi!\x00" {
 		t.Fatalf("invalid image description entry: %+v", entries[0])
 	}
-	// the ExifIFDPointer LONG entry
+	// ExifIFDPointer 的 LONG 条目。
+	// the ExifIFDPointer LONG entry.
 	if entries[1].Tag != 0x8769 || entries[1].Type != 4 || entries[1].Count != 1 ||
 		tk.Uint32(entries[1].Value[:4]) != 38 {
 		t.Fatalf("invalid exif pointer entry: %+v", entries[1])
 	}
-	// the rational of the Exif IFD, resolved through the offset
+	// 经偏移解析出的 Exif IFD 有理数。
+	// the rational of the Exif IFD, resolved through the offset.
 	if entries[2].Tag != 0x829A || entries[2].Type != 5 || entries[2].Count != 1 ||
 		tk.Uint32(entries[2].Value[:4]) != 1 || tk.Uint32(entries[2].Value[4:8]) != 100 {
 		t.Fatalf("invalid exposure time entry: %+v", entries[2])
 	}
-	// untouched: byte for byte write back
+	// 未修改：逐字节写回。
+	// untouched: byte for byte write back.
 	written, err := p.MarshalBytes()
 	if err != nil {
 		t.Fatal(err)
@@ -924,14 +1169,19 @@ func TestEXIFStruct(t *testing.T) {
 	if !bytes.Equal(written, data) {
 		t.Fatal("the untouched eXIf chunk was not written back byte for byte")
 	}
-	// a truncated tiff stream must produce a clean error
+	// 截断的 TIFF 流必须报出干净的错误。
+	// a truncated tiff stream must produce a clean error.
 	broken := &EXIF{Data: tiff[:4]}
 	if _, err = broken.Entries(); err == nil {
 		t.Fatal("expected an error for a truncated tiff stream")
 	}
 }
 
-// chunkTypeCodes walks a png stream and lists its chunk type codes in order.
+// chunkTypeCodes 遍历 PNG 流并按顺序列出 chunk 类型码，遇到 IEND 停止，
+// 用于断言写回后的 chunk 顺序。
+//
+// chunkTypeCodes walks a png stream and lists its chunk type codes in order,
+// stopping at IEND. It is used to assert chunk order after a write-back.
 func chunkTypeCodes(t *testing.T, data []byte) []string {
 	t.Helper()
 	r := bytes.NewReader(data)
@@ -953,7 +1203,7 @@ func chunkTypeCodes(t *testing.T, data []byte) []string {
 		if _, err := io.CopyN(io.Discard, r, int64(size)); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := io.CopyN(io.Discard, r, 4); err != nil { // crc
+		if _, err := io.CopyN(io.Discard, r, 4); err != nil { // CRC 字段 / crc field
 			t.Fatal(err)
 		}
 		out = append(out, string(code[:]))
@@ -963,6 +1213,12 @@ func chunkTypeCodes(t *testing.T, data []byte) []string {
 	}
 }
 
+// TestWriteToRoundtrip 验证写回是无损的：解析后 MarshalBytes 的输出必须与原文件
+// 逐字节一致，且开启 CRC 校验也能重新解析通过。
+//
+// TestWriteToRoundtrip verifies a lossless write-back: MarshalBytes of a parsed
+// file must be byte identical to the original, and the result must parse again
+// with CRC verification turned on.
 func TestWriteToRoundtrip(t *testing.T) {
 	for _, name := range []string{"./demo.png", "./png-format.png"} {
 		t.Run(name, func(t *testing.T) {
@@ -981,7 +1237,8 @@ func TestWriteToRoundtrip(t *testing.T) {
 			if !bytes.Equal(original, written) {
 				t.Fatalf("roundtrip is not byte-identical: got %d bytes, want %d", len(written), len(original))
 			}
-			// the re-written file must also validate with crc checking on
+			// 重写的文件在开启 CRC 校验时也必须能通过解析。
+			// the re-written file must also validate with crc checking on.
 			if _, err = ParsePng(bytes.NewReader(written), true); err != nil {
 				t.Fatalf("re-written file has invalid crcs: %v", err)
 			}
@@ -989,6 +1246,10 @@ func TestWriteToRoundtrip(t *testing.T) {
 	}
 }
 
+// TestEditMetadata 验证修改 tEXt 文本后写回：重新解析读到新值，图像数据保持不变。
+//
+// TestEditMetadata verifies that editing a tEXt value survives a write-back: a
+// re-parse reads the new value and the image data stays untouched.
 func TestEditMetadata(t *testing.T) {
 	data := buildPng(
 		chunkBytes("IHDR", ihdrBytes(1, 1, 8, 0)),
@@ -1014,10 +1275,17 @@ func TestEditMetadata(t *testing.T) {
 	if len(p2.TEXTs) != 1 || p2.TEXTs[0].Text != "after" {
 		t.Fatalf("edited text was not written: %+v", p2.TEXTs)
 	}
-	// the image data must be untouched
+	// 图像数据必须保持不变。
+	// the image data must be untouched.
 	assertImageEqual(t, decodeWithStd(t, written), parseAndDecode(t, written))
 }
 
+// TestDeleteRawChunk 验证删除原始 chunk：删除计数正确，写回后该 chunk 从流中
+// 消失、顺序恢复为 IHDR 紧跟 IDAT，图像仍能解码。
+//
+// TestDeleteRawChunk verifies raw-chunk deletion: the removal count is right,
+// the chunk disappears from the stream on write-back, the order returns to
+// IHDR followed by IDAT, and the image still decodes.
 func TestDeleteRawChunk(t *testing.T) {
 	data := buildPng(
 		chunkBytes("IHDR", ihdrBytes(1, 1, 8, 0)),
@@ -1042,14 +1310,24 @@ func TestDeleteRawChunk(t *testing.T) {
 	if len(p2.RawChunks()) != 0 {
 		t.Fatalf("sRGB chunk was not removed: %+v", p2.RawChunks())
 	}
+	// 辅助 chunk 必须已从流中消失，但图像仍必须能解码。
 	// the ancillary chunk must have gone from the stream, but the image must
-	// still decode
+	// still decode.
 	if codes := chunkTypeCodes(t, written); codes[1] != "IDAT" {
 		t.Fatalf("unexpected chunk order: %v", codes)
 	}
 	assertImageEqual(t, decodeWithStd(t, written), parseAndDecode(t, written))
 }
 
+// TestAddRawChunkXMP 验证新增 chunk：用 NewITXTChunk 构造压缩 iTXt（XMP）并经
+// AddRawChunk 插入；添加单一出现的 chunk（如 IHDR）必须报错；写回后新 chunk 位于
+// 首个 IDAT 之前，能解析回原值，图像不受影响。
+//
+// TestAddRawChunkXMP verifies chunk insertion: it builds a compressed iTXt
+// (XMP) with NewITXTChunk and inserts it via AddRawChunk; adding a
+// single-occurrence chunk such as IHDR must fail; after write-back the new
+// chunk sits before the first IDAT, parses back to the same value and the image
+// is unaffected.
 func TestAddRawChunkXMP(t *testing.T) {
 	data := buildPng(
 		chunkBytes("IHDR", ihdrBytes(1, 1, 8, 0)),
@@ -1066,7 +1344,8 @@ func TestAddRawChunkXMP(t *testing.T) {
 	if err = p.AddRawChunk(name, payload); err != nil {
 		t.Fatal(err)
 	}
-	// it must be illegal to add a single-occurrence chunk
+	// 添加单一出现的 chunk 必须非法。
+	// it must be illegal to add a single-occurrence chunk.
 	if err = p.AddRawChunk(IHDRChunk, make([]byte, 13)); err == nil {
 		t.Fatal("expected an error when adding an IHDR chunk")
 	}
@@ -1074,7 +1353,8 @@ func TestAddRawChunkXMP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// the new chunk must be inserted before the first IDAT
+	// 新增的 chunk 必须插到首个 IDAT 之前。
+	// the new chunk must be inserted before the first IDAT.
 	codes := chunkTypeCodes(t, written)
 	if codes[1] != "iTXt" || codes[2] != "IDAT" || codes[3] != "IEND" {
 		t.Fatalf("unexpected chunk order: %v", codes)
@@ -1089,9 +1369,12 @@ func TestAddRawChunkXMP(t *testing.T) {
 	assertImageEqual(t, decodeWithStd(t, written), parseAndDecode(t, written))
 }
 
+// adam7Encode 把最终（非隔行）布局的未过滤扫描行转换成 Adam7 隔行 PNG 的已过滤
+// 数据流：每个 pass 的数据流像真实编码器那样各自独立过滤。
+//
 // adam7Encode turns unfiltered scanlines of the final (non-interlaced) layout
 // into the filtered datastream of an Adam7 interlaced png. The pass streams
-// are unfiltered separately per pass, like a real encoder does.
+// are filtered separately per pass, like a real encoder does.
 func adam7Encode(t *testing.T, width, height int, bitDepth, colorType uint8, rows [][]byte, filters []byte) []byte {
 	t.Helper()
 	channels := colorTypeChannels[colorType]
@@ -1122,6 +1405,8 @@ func adam7Encode(t *testing.T, width, height int, bitDepth, colorType uint8, row
 	return out
 }
 
+// ihdrBytesInterlaced 与 ihdrBytes 相同，但把隔行方法设为 Adam7（方法 1）。
+//
 // ihdrBytesInterlaced is ihdrBytes with Adam7 interlace method 1.
 func ihdrBytesInterlaced(w, h uint32, bitDepth, colorType uint8) []byte {
 	d := ihdrBytes(w, h, bitDepth, colorType)
@@ -1129,6 +1414,12 @@ func ihdrBytesInterlaced(w, h uint32, bitDepth, colorType uint8) []byte {
 	return d
 }
 
+// TestAdam7Truecolor 验证 Adam7 隔行的真彩色图（5x5、位深 8、颜色类型 2）：
+// 本库解码结果必须与标准库逐像素一致。
+//
+// TestAdam7Truecolor verifies an Adam7-interlaced truecolor image (5x5, bit
+// depth 8, color type 2): this library must decode pixel for pixel identical
+// to the standard library.
 func TestAdam7Truecolor(t *testing.T) {
 	const w, h = 5, 5
 	rows := make([][]byte, h)
@@ -1149,6 +1440,12 @@ func TestAdam7Truecolor(t *testing.T) {
 	assertImageEqual(t, decodeWithStd(t, data), parseAndDecode(t, data))
 }
 
+// TestAdam7PaletteSubByte 验证 Adam7 隔行的调色板图（7x5、位深 4、带 tRNS）：
+// 本库解码结果必须与标准库逐像素一致。
+//
+// TestAdam7PaletteSubByte verifies an Adam7-interlaced palette image (7x5, bit
+// depth 4, with tRNS): this library must decode pixel for pixel identical to
+// the standard library.
 func TestAdam7PaletteSubByte(t *testing.T) {
 	const w, h = 7, 5
 	var plte []byte
