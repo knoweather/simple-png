@@ -1,7 +1,10 @@
 //go:build js && wasm
 
-// Command pngwasm — the simple-png WebAssembly entry point
-// (GOOS=js GOARCH=wasm).
+// Command pngwasm 是 simple-png 库的 WebAssembly 入口（GOOS=js GOARCH=wasm）。
+// 启动后，下列函数注册到 globalThis，完整用法见 wasm 包文档（wasm/wasm.go）。
+//
+// Command pngwasm is the simple-png WebAssembly entry point
+// (GOOS=js GOARCH=wasm). Build it with:
 //
 //	$ GOOS=js GOARCH=wasm go build -o png.wasm ./cmd/pngwasm
 //

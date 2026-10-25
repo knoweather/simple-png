@@ -1,13 +1,17 @@
 //go:build js && wasm
 
+// Package wasm 通过 WebAssembly 构建（GOOS=js GOARCH=wasm）把 simple-png 的
+// 解析器与编辑器暴露给 JavaScript。
+//
 // Package wasm exposes the simple-png parser and editor to JavaScript
 // through a WebAssembly build (GOOS=js GOARCH=wasm).
 //
-// Build:
+// 构建 / Build:
 //
 //	GOOS=js GOARCH=wasm go build -o png.wasm ./cmd/pngwasm
 //
-// JS-side usage (browser or Node via $GOROOT/lib/wasm/wasm_exec.js):
+// JS 侧用法（浏览器或 Node，经 $GOROOT/lib/wasm/wasm_exec.js 加载）/ JS-side
+// usage (browser or Node via $GOROOT/lib/wasm/wasm_exec.js):
 //
 //	import { Go } from "./go.js"
 //	const go = new Go()
@@ -27,7 +31,7 @@
 //	const out = globalThis.pngWrite() // re-serialized file bytes (ArrayBuffer)
 //	globalThis.pngClose()
 //
-// pngSummary() returns:
+// pngSummary() 返回 / returns:
 //
 //	{
 //	  width, height, bitDepth, colorType, colorTypeName,
@@ -38,13 +42,25 @@
 //	  itx: [{keyword, compressionFlag, languageTag, translatedKeyword, text, len}]
 //	                             iTXt entries (consumed, decoded; XMP rides here)
 //
+// colorTypeName 把 IHDR 的颜色类型码映射为 "grayscale"、"truecolor"、
+// "palette"、"grayscale+alpha" 或 "truecolor+alpha" 之一。
+//
 // colorTypeName maps the IHDR color type to one of "grayscale", "truecolor",
 // "palette", "grayscale+alpha" or "truecolor+alpha".
+//
+// pngEncode(width, height, rgba, extras) 从 RGBA 8 位像素构建新的 PNG：
+// alpha 通道完整保留；extras（JS 数组，元素为 {name, data}）在 PNG 签名之后、
+// 内部 chunk 之前输出。返回文件字节（ArrayBuffer），失败时返回 "error: ..."。
 //
 // pngEncode(width, height, rgba, extras) builds a new PNG from RGBA 8-bit
 // pixels: full NRGBA alpha, extras (a JS array of {name, data}) are emitted
 // right after the PNG signature, before the internal chunks. Returns the
 // file bytes (ArrayBuffer) or the "error: ..." string.
+//
+// 约定 / Convention：每个可能失败的函数在失败时返回字符串 "error: ..."（与
+// simple-netcdf 的 wasm 包保持一致）；pngWrite 返回的 ArrayBuffer 是当前模型的
+// 重新序列化——未触碰的 chunk 逐字节复制，因此元数据写回保持忠实。像素字节始终
+// 是每通道 1 字节的 RGBA（dtype "rgba8"）。
 //
 // Convention: every fallible function returns the string "error: ..." on
 // failure (matching the simple-netcdf wasm package); pngWrite hands back an
@@ -63,9 +79,18 @@ import (
 	"github.com/knoweather/simple-png"
 )
 
+// cur 是当前打开的文件模型；所有导出函数都操作它，没有打开文件时为 nil。
+//
+// cur is the currently opened file model; every exported function operates
+// on it, and it is nil while no file is open.
 var cur *simple_png.Png
 
-// Run registers the JS global functions and blocks (wasm entry point).
+// Run 把下列函数注册为 JS 全局函数并阻塞（wasm 入口）。Go 的 wasm 程序不能
+// 正常退出，因此注册完成后以 select {} 挂起，直到 JS 侧丢弃该实例。
+//
+// Run registers the JS global functions and blocks (wasm entry point). A Go
+// wasm program must not exit normally, so after registering it parks in
+// select {} until the JS side drops the instance.
 func Run() {
 	g := js.Global()
 	g.Set("pngOpen", js.FuncOf(func(_ js.Value, args []js.Value) any {
@@ -137,9 +162,12 @@ func Run() {
 		Close()
 		return ""
 	}))
-	select {} // the wasm program idles until the JS side drops it
+	select {} // wasm 程序挂起，直到 JS 侧丢弃它 / the wasm program idles until the JS side drops it
 }
 
+// Open 解析一段 PNG 字节流，并替换当前打开的文件。CRC 校验可选、默认关闭，
+// 与 ParsePng 的行为一致。
+//
 // Open parses a PNG byte stream, replacing the previously opened file.
 // CRC verification is optional and off by default, mirroring ParsePng.
 func Open(data []byte, verifyCRC bool) error {
@@ -151,9 +179,15 @@ func Open(data []byte, verifyCRC bool) error {
 	return nil
 }
 
+// Close 丢弃当前打开的文件。
+//
 // Close discards the current file.
 func Close() { cur = nil }
 
+// Summary 返回 IHDR 头以及按文件顺序排列的 chunk 表（JS 对象）。chunk 表只
+// 列出原生解析未消费的 chunk（基础 chunk IHDR/IDAT/PLTE/… 存放在各自的类型化
+// 字段中）；idatCount 是 IDAT chunk 的个数。
+//
 // Summary returns the IHDR header and the ordered chunk table (JS object).
 // The chunk table lists the chunks that native parsing has NOT consumed
 // (the base chunks IHDR/IDAT/PLTE/... live in their typed fields);
@@ -188,7 +222,8 @@ func Summary() (js.Value, error) {
 	}
 	obj.Set("chunks", chunks)
 
-	// Consumed text metadata, decoded — XMP rides inside iTXt:
+	// 已消费的文本元数据，已解码——XMP 内嵌在 iTXt 中
+	// Consumed text metadata, decoded — XMP rides inside iTXt
 	txx := newArray()
 	for i, t := range cur.TEXTs {
 		o := newObject()
@@ -212,6 +247,9 @@ func Summary() (js.Value, error) {
 	return obj, nil
 }
 
+// RawChunkData 按 RawChunks 的顺序返回其中一个原样 chunk，返回值为
+// {name, crc, len, bytes}。
+//
 // RawChunkData returns one raw chunk from the ordered RawChunks list.
 // Returns {name, crc, len, bytes}.
 func RawChunkData(index int) (js.Value, error) {
@@ -231,6 +269,9 @@ func RawChunkData(index int) (js.Value, error) {
 	return obj, nil
 }
 
+// RawChunkByName 以 [{name, crc, bytes}] 返回某个 chunk 类型的每一次出现；
+// 未知类型返回空数组而不是错误（与 RawChunks 这条最简读取路径保持一致）。
+//
 // RawChunkByName returns every occurrence of a chunk type as
 // [{name, crc, bytes}]; an unknown type yields an empty array (not an error,
 // matching RawChunks as the simplest read path).
@@ -252,6 +293,10 @@ func RawChunkByName(name string) (js.Value, error) {
 	return arr, nil
 }
 
+// Pixels 解码图像数据（IDATsToColor），并以 RGBA 8 位字节返回：
+// {dtype:"rgba8", width, height, bytes}。所有颜色类型（含调色板与 16 位图像）
+// 都经 image.(*NRGBA) 转换。
+//
 // Pixels decodes the image data (IDATsToColor) and returns it as RGBA 8-bit
 // bytes: {dtype:"rgba8", width, height, bytes}. Every color type (including
 // palette and 16-bit images) is converted through image.(*NRGBA).
@@ -268,18 +313,24 @@ func Pixels() (js.Value, error) {
 		w, h = b.Dx(), b.Dy()
 	}
 	n := image.NewNRGBA(image.Rect(0, 0, w, h))
-	// draw handles every supported image.Image type, palette and 16-bit included;
-	// zero-alpha NRGBA pixels (when img covers a smaller area) stay transparent.
+	// draw 支持所有 image.Image 类型（含调色板与 16 位）；当 img 覆盖的区域小于
+	// 目标时，未被绘制到的 NRGBA 像素保持全透明
+	// draw handles every supported image.Image type, palette and 16-bit
+	// included; zero-alpha NRGBA pixels (when img covers a smaller area) stay
+	// transparent.
 	draw.Draw(n, n.Bounds(), img, img.Bounds().Min, draw.Src)
 	obj := newObject()
 	obj.Set("dtype", "rgba8")
 	obj.Set("width", w)
 	obj.Set("height", h)
+	// NewNRGBA 保证 Stride == 4*width，因此 Pix 恰好是一块稠密连续缓冲区
 	// NewNRGBA gives Stride == 4*width exactly, so Pix is one dense buffer.
 	obj.Set("bytes", bytesToJS(n.Pix))
 	return obj, nil
 }
 
+// SetRawChunk 向模型添加一个原样 chunk（对应 Png.AddRawChunk）。
+//
 // SetRawChunk adds a raw chunk to the model (mirrors Png.AddRawChunk).
 func SetRawChunk(name string, data []byte) error {
 	if cur == nil {
@@ -288,6 +339,10 @@ func SetRawChunk(name string, data []byte) error {
 	return cur.AddRawChunk(simple_png.ChunkName(name), data)
 }
 
+// DeleteRawChunk 删除指定类型的全部原样 chunk（对应 Png.DeleteRawChunk）。
+// 只有原样（残留）chunk 可被删除——已消费进类型化字段的 chunk（IHDR/IDAT/
+// tEXt/iTXt/…）要通过各自的结构体修改，因此文本元数据在写回时自然保留。
+//
 // DeleteRawChunk removes every raw chunk of the given type
 // (mirrors Png.DeleteRawChunk). Only raw/leftover chunks are removable —
 // chunks consumed into typed fields (IHDR/IDAT/tEXt/iTXt/...) are edited
@@ -300,6 +355,9 @@ func DeleteRawChunk(name string) error {
 	return nil
 }
 
+// Write 把当前模型重新序列化为文件字节（ArrayBuffer）。未触碰的原样 chunk
+// 逐字节复制；长度与 CRC 由库重新计算。
+//
 // Write re-serializes the current model into file bytes (ArrayBuffer).
 // Untouched raw chunks are copied byte for byte; lengths, padding and CRCs
 // are recomputed by the library.
@@ -314,6 +372,10 @@ func Write() (js.Value, error) {
 	return bytesToJS(buf.Bytes()), nil
 }
 
+// Encode 从 RGBA 8 位像素字节（宽度*高度*4）构建新的 PNG。extras 是 JS 数组，
+// 元素为 {name, data}，这些 chunk 在 PNG 签名之后立即输出（可以是除
+// IHDR/IDAT/IEND 外的任意 4 字节类型）；返回的文件字节为 ArrayBuffer。
+//
 // Encode builds a new PNG from RGBA 8-bit pixel bytes (width*height*4).
 // extras is a JS array of {name, data} chunks emitted right after the PNG
 // signature (any 4 byte type except IHDR/IDAT/IEND); returns the file bytes
@@ -356,6 +418,8 @@ func Encode(width, height int, rgba []byte, extras js.Value) (js.Value, error) {
 	return bytesToJS(buf.Bytes()), nil
 }
 
+// colorTypeName 把 IHDR 颜色类型码映射为可读名称，未知码返回 "unknown"。
+//
 // colorTypeName maps an IHDR color type code to a readable name.
 func colorTypeName(t uint8) string {
 	switch t {
@@ -373,11 +437,14 @@ func colorTypeName(t uint8) string {
 	return "unknown"
 }
 
-// ---- JS value helpers ----
+// ---- JS 值辅助函数 / JS value helpers ----
 
 func newObject() js.Value { return js.Global().Get("Object").New() }
 func newArray() js.Value  { return js.Global().Get("Array").New() }
 
+// bytesToJS 把字节切片复制进新建的 Uint8Array，并返回其底层 ArrayBuffer
+// （Go 1.27 的 CopyBytesToJS 只接受 Uint8Array）。
+//
 // bytesToJS wraps a byte slice into a fresh Uint8Array and hands back the
 // underlying ArrayBuffer (Go 1.27 CopyBytesToJS accepts only Uint8Array).
 func bytesToJS(b []byte) js.Value {
@@ -386,19 +453,25 @@ func bytesToJS(b []byte) js.Value {
 	return ua.Get("buffer")
 }
 
+// copyBuf 返回 b 的防御性副本——WriteTo 使用的缓冲区始终留在 Go 侧。
+//
 // copyBuf returns a defensive copy of b — WriteTo's buffer stays ours.
 func copyBuf(b []byte) js.Value { return bytesToJS(b) }
 
+// jsToBytes 从 JS 的 ArrayBuffer 或 TypedArray 复制出字节。这是防御性复制：
+// Go 侧从不借用 JS 的内存。
+//
 // jsToBytes copies bytes out of a JS ArrayBuffer or TypedArray. Defensive
 // copy: the Go side never borrows JS memory.
 func jsToBytes(v js.Value) []byte {
 	UA := js.Global().Get("Uint8Array")
 	var src js.Value
 	if buf := v.Get("buffer"); buf.Type() == js.TypeObject && !buf.IsNull() {
+		// TypedArray：经 byteOffset/byteLength 保留子视图的语义
 		// TypedArray: keep the sub-view semantics via byteOffset/byteLength.
 		src = UA.New(buf, v.Get("byteOffset").Int(), v.Get("byteLength").Int())
 	} else {
-		src = UA.New(v) // ArrayBuffer → whole view
+		src = UA.New(v) // ArrayBuffer → 整个视图 / whole view
 	}
 	b := make([]byte, src.Get("length").Int())
 	js.CopyBytesToGo(b, src)

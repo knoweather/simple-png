@@ -10,19 +10,27 @@ import (
 	"github.com/pkg/errors"
 )
 
-// colorTypeChannels maps a png color type to the number of samples per pixel
+// colorTypeChannels 把 PNG 颜色类型映射为每像素的采样个数，对应 PNG 规范
+// IHDR color type 与样本数的对应表。
+//
+// colorTypeChannels maps a PNG color type to the number of samples per pixel,
+// per the IHDR color type table of the PNG specification.
 var colorTypeChannels = map[uint8]int{
-	0: 1, // grayscale
-	2: 3, // truecolor rgb
-	3: 1, // indexed palette
-	4: 2, // grayscale + alpha
-	6: 4, // truecolor rgb + alpha
+	0: 1, // 灰度 / grayscale
+	2: 3, // 真彩色 RGB / truecolor RGB
+	3: 1, // 索引调色板 / indexed palette
+	4: 2, // 灰度 + alpha / grayscale + alpha
+	6: 4, // 真彩色 RGB + alpha / truecolor RGB + alpha
 }
 
-// inflateIDATs concatenates the data of all IDAT chunks (multiple IDAT chunks
-// are allowed, their concatenation is the compressed datastream) and
-// decompresses it with zlib as required by compression method 0.
-// The decompressed size must be exactly `want` bytes, as derived from IHDR.
+// inflateIDATs 拼接全部 IDAT chunk 的数据（规范允许任意多个 IDAT，其拼接结果
+// 就是压缩数据流），再按压缩方法 0 的要求用 zlib 解压。解压出的字节数必须恰好
+// 等于由 IHDR 推导出的 want。
+//
+// inflateIDATs concatenates the data of all IDAT chunks (the spec allows any
+// number of them; their concatenation is the compressed datastream) and
+// decompresses it with zlib as required by compression method 0. The
+// decompressed size must be exactly the want bytes derived from IHDR.
 func (p *Png) inflateIDATs(want int) ([]byte, error) {
 	readers := make([]io.Reader, 0, len(p.IDATs))
 	for _, idat := range p.IDATs {
@@ -36,6 +44,8 @@ func (p *Png) inflateIDATs(want int) ([]byte, error) {
 	if _, err = io.ReadFull(zr, raw); err != nil {
 		return nil, errors.WithMessage(err, "unexpected decompressed idat size")
 	}
+	// zlib 流必须在此处正好耗尽：还能读出一个字节，就说明解压后的图像数据
+	// 多于 IHDR 声明的大小。
 	// the zlib stream must be exhausted exactly here: another readable byte
 	// means the decompressed image data is larger than IHDR says
 	var extra [1]byte
@@ -49,6 +59,10 @@ func (p *Png) inflateIDATs(want int) ([]byte, error) {
 	return raw, nil
 }
 
+// unfilterInto 逆向滤波方法 0 的扫描线滤波，把还原后的扫描线写入 dest
+// （这些切片可能直接别名 image.Pix 缓冲）。每条扫描线消耗 1 字节滤波类型，
+// 后跟 len(dest[y]) 字节数据；raw 必须被恰好耗尽。
+//
 // unfilterInto reverses the scanline filter of filter method 0, writing the
 // unfiltered scanlines into dest (whose slices may alias an image.Pix
 // buffer). Each scanline consumes one filter type byte followed by
@@ -81,11 +95,11 @@ func unfilterInto(dest [][]byte, raw []byte, bpp int) error {
 				}
 				cur[x] = data[x] + a
 			}
-		case 2: // Up
+		case 2: // Up：减去上邻样本 / Up: subtract the sample above
 			for x := 0; x < len(cur); x++ {
 				cur[x] = data[x] + prev[x]
 			}
-		case 3: // Average
+		case 3: // Average：减去左邻与上邻均值 / Average: subtract mean of left and above
 			for x := 0; x < len(cur); x++ {
 				var a byte
 				if x >= bpp {
@@ -93,7 +107,7 @@ func unfilterInto(dest [][]byte, raw []byte, bpp int) error {
 				}
 				cur[x] = data[x] + byte((int(a)+int(prev[x]))/2)
 			}
-		case 4: // Paeth
+		case 4: // Paeth：Paeth 预测子 / Paeth predictor
 			for x := 0; x < len(cur); x++ {
 				var a, c byte
 				if x >= bpp {
@@ -113,7 +127,12 @@ func unfilterInto(dest [][]byte, raw []byte, bpp int) error {
 	return nil
 }
 
-// paethFilter computes the Paeth predictor, as defined in the png spec.
+// paethFilter 计算 PNG 规范定义的 Paeth 预测子：取线性预测值 p = a+b-c，
+// 返回 a、b、c 中与 p 距离最小者（并列时按 a、b、c 的顺序取先者）。
+//
+// paethFilter computes the Paeth predictor as defined in the PNG
+// specification: it forms the linear prediction p = a+b-c and returns whichever
+// of a, b, c is closest to it (ties broken in the order a, b, c).
 func paethFilter(a, b, c byte) byte {
 	p := int(a) + int(b) - int(c)
 	pa, pb, pc := absInt(p-int(a)), absInt(p-int(b)), absInt(p-int(c))
@@ -126,6 +145,9 @@ func paethFilter(a, b, c byte) byte {
 	return c
 }
 
+// absInt 返回 i 的绝对值。
+//
+// absInt returns the absolute value of i.
 func absInt(i int) int {
 	if i < 0 {
 		return -i
@@ -139,8 +161,11 @@ type adam7Pass struct {
 	dx, dy     int
 }
 
+// adam7Passes 按扫描线在数据流中的存储顺序列出 Adam7 隔行的七个 pass，
+// 见 PNG 规范中的 Adam7 示意图。
+//
 // adam7Passes are the seven Adam7 passes in the order their scanlines are
-// stored in the file, see the png spec.
+// stored in the datastream; see the Adam7 illustration in the PNG spec.
 var adam7Passes = []adam7Pass{
 	{0, 0, 8, 8},
 	{4, 0, 8, 8},
@@ -151,14 +176,22 @@ var adam7Passes = []adam7Pass{
 	{0, 1, 1, 2},
 }
 
-// adam7PassSize returns the number of pixels of one pass (a pass is skipped
-// when the increment does not yield any pixel of the image).
+// adam7PassSize 返回单个 pass 的像素尺寸 (pw, ph)；当步长在图像范围内产生
+// 不出任何像素时该 pass 被跳过，此时结果为 0。
+//
+// adam7PassSize returns the pixel size (pw, ph) of a single pass; a pass is
+// skipped when its increments yield no pixel of the image, in which case the
+// result is 0.
 func adam7PassSize(width, height int, ps adam7Pass) (pw, ph int) {
 	return (width-ps.xOff+ps.dx-1)/ps.dx, (height-ps.yOff+ps.dy-1)/ps.dy
 }
 
+// adam7Size 返回 Adam7 隔行图像全部七个 pass 的扫描线解压后共有的字节数，
+// 即期望解压长度（每条扫描线含 1 字节滤波类型）。
+//
 // adam7Size returns the number of decompressed bytes the scanlines of all
-// seven passes of an Adam7 interlaced image consist of.
+// seven passes of an Adam7 interlaced image consist of, i.e. the expected
+// inflated length (one filter type byte per scanline).
 func adam7Size(width, height, channels, bitDepth int) int {
 	total := 0
 	for _, ps := range adam7Passes {
@@ -172,6 +205,10 @@ func adam7Size(width, height, channels, bitDepth int) int {
 	return total
 }
 
+// deinterlaceInto 逆向 Adam7 隔行：逐个 pass 反滤波，再把样本写入非隔行图像
+// 中对应的坐标（各行可能直接别名 image.Pix 缓冲）。raw 是全部 pass 数据流的
+// 拼接，必须被恰好耗尽。
+//
 // deinterlaceInto reverses Adam7 interlacing: the seven passes are
 // unfiltered one by one and their pixels are placed into the positions of
 // the non-interlaced image (the rows may alias an image.Pix buffer).
@@ -184,6 +221,7 @@ func deinterlaceInto(dest [][]byte, raw []byte, width, height, channels, bitDept
 			continue
 		}
 		passStride := (pw*channels*bitDepth + 7) / 8
+		// 每个 pass 都当作一幅独立图像来反滤波
 		// each pass is unfiltered like a separate image
 		block := make([]byte, passStride*ph)
 		rows := make([][]byte, ph)

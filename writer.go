@@ -9,6 +9,8 @@ import (
 	"github.com/pkg/errors"
 )
 
+// chunkWriter 把 PNG 流写入底层 writer，并累计已写出的字节数。
+//
 // chunkWriter writes a png stream and counts the written bytes.
 type chunkWriter struct {
 	w   io.Writer
@@ -22,7 +24,15 @@ func (cw *chunkWriter) write(b []byte) error {
 	return err
 }
 
-// writeChunk writes one full chunk: length, type code, data, crc (recomputed).
+// writeChunk 写出一个完整 chunk：4 字节长度、4 字节类型码、数据区、4 字节
+// CRC。CRC 按 PNG 规范对「类型码 + 数据区」用 IEEE CRC-32 重新计算；长度与
+// CRC 均为大端序，数据区不得超过 0x7FFFFFFF 字节。
+//
+// writeChunk writes one full chunk: 4-byte length, 4-byte type code, the
+// data area, and a 4-byte CRC. The CRC is recomputed with the IEEE CRC-32
+// over the type code plus the data area as required by the PNG spec; length
+// and CRC are big-endian, and the data area must not exceed 0x7FFFFFFF
+// bytes.
 func (cw *chunkWriter) writeChunk(name ChunkName, data []byte) error {
 	if len(name) != 4 {
 		return errors.Errorf("invalid chunk name %q", string(name))
@@ -45,6 +55,18 @@ func (cw *chunkWriter) writeChunk(name ChunkName, data []byte) error {
 	return cw.write(cw.buf[:4])
 }
 
+// WriteTo 把当前状态序列化为 PNG 流写入 w，实现 io.WriterTo（因此可直接配合
+// io.Copy 使用）。解析时被消费进类型化字段的 chunk 会从解析后的结构体重新序列化，
+// 对结构体的修改（以及通过 AddRawChunk / DeleteRawChunk 增删的 chunk）都会体现
+// 在输出中；仍以原样保留的 chunk 则逐字节复制。对未经修改的文件做「解析 → 写回」
+// 可逐字节复现原文件。每个写出的 chunk 的 CRC 都会重新计算。
+//
+// 注意：压缩文本 chunk（zTXt，以及压缩标志置位的 iTXt）在 Text 字段未被修改时
+// 逐字节保留；一旦修改，则用默认 zlib 压缩级别重新压缩。
+//
+// 读取由内部读锁保护：其他 goroutine 可以同时通过 RawChunks /
+// GetOtherChunkByName 读取元数据；同一实例上的并发写入则与编辑方法互相串行。
+//
 // WriteTo writes the png stream of the current state, implementing
 // io.WriterTo (so it works with io.Copy). Chunks that were consumed while
 // parsing are re-serialized from their parsed structs, so any modifications
@@ -71,6 +93,7 @@ func (p *Png) WriteTo(w io.Writer) (int64, error) {
 	if err := cw.write(pngHeaderBytes); err != nil {
 		return cw.n, err
 	}
+	// 出现次数游标：把某类可重复 chunk 的第 k 次出现对应到它的第 k 个解析结构体
 	// occurrence cursors map the k-th consumed chunk of a repeating chunk
 	// type to the k-th parsed struct of that type
 	var idatIdx, textIdx, ztxtIdx, itxtIdx int
@@ -80,6 +103,7 @@ func (p *Png) WriteTo(w io.Writer) (int64, error) {
 		}
 		name := ChunkName(c.code[:])
 		if !p.origConsumed[i] {
+			// 未被消费的 chunk：原样复制
 			// unconsumed chunk: copy it verbatim
 			if err := cw.writeChunk(name, c.data); err != nil {
 				return cw.n, err
@@ -97,6 +121,10 @@ func (p *Png) WriteTo(w io.Writer) (int64, error) {
 	return cw.n, nil
 }
 
+// emitConsumed 从解析后的结构体重建被消费 chunk 的数据区。出现次数游标耗尽
+// （正常解析后不应发生）或该 chunk 类型没有专门的结构体（由用户自定义解析的
+// 自定义 chunk）时，退化为直接返回原始数据。
+//
 // emitConsumed builds the data area of a consumed chunk from the parsed
 // struct. An exhausted occurrence cursor (must not happen after a normal
 // parse) or a chunk type without a dedicated struct (a custom chunk parsed
@@ -134,13 +162,13 @@ func (p *Png) emitConsumed(name ChunkName, c *chunk, idatIdx, textIdx, ztxtIdx, 
 			return c.data, nil
 		}
 		switch p.IHDR.ColorType {
-		case 3: // palette index
+		case 3: // 调色板索引 / palette index
 			return []byte{p.BKGD.Palette}, nil
-		case 0, 4: // gray
+		case 0, 4: // 灰度 / grayscale
 			var b [2]byte
 			by.PutUint16(b[:], p.BKGD.Gray)
 			return b[:], nil
-		default: // rgb
+		default: // 真彩色 / truecolor (RGB)
 			var b [6]byte
 			by.PutUint16(b[0:2], p.BKGD.Red)
 			by.PutUint16(b[2:4], p.BKGD.Green)
@@ -197,6 +225,7 @@ func (p *Png) emitConsumed(name ChunkName, c *chunk, idatIdx, textIdx, ztxtIdx, 
 		if p.SBIT == nil {
 			return c.data, nil
 		}
+		// sBIT 的数据区长度取决于颜色类型
 		// the length of sBIT depends on the color type
 		var n int
 		switch p.IHDR.ColorType {
@@ -227,6 +256,8 @@ func (p *Png) emitConsumed(name ChunkName, c *chunk, idatIdx, textIdx, ztxtIdx, 
 		if p.ICCP == nil {
 			return c.data, nil
 		}
+		// c.data 是「profile 名称 + 0x00 + 压缩方法 + 压缩后的 profile」；当名称、
+		// 压缩方法与（解压后的）profile 均未修改时，逐字节保留原数据
 		// c.data is name + null + method + compressed profile; keep it
 		// byte for byte when the name, the method and the (decompressed)
 		// profile were not modified
@@ -288,6 +319,8 @@ func (p *Png) emitConsumed(name ChunkName, c *chunk, idatIdx, textIdx, ztxtIdx, 
 		}
 		z := p.ZTXTs[*ztxtIdx]
 		*ztxtIdx++
+		// c.data 是「关键词 + 0x00 + 压缩方法 + 压缩后的文本」；文本未被修改时
+		// 逐字节保留原数据
 		// c.data is keyword + null + method + compressed text; preserve it
 		// byte for byte when the text was not modified
 		sep := bytes.IndexByte(c.data, 0x00)
@@ -325,17 +358,25 @@ func (p *Png) emitConsumed(name ChunkName, c *chunk, idatIdx, textIdx, ztxtIdx, 
 			}
 			return rebuildITXT(x, text), nil
 		}
-		// byte for byte identical to the parsed chunk when untouched
+		// 未压缩的 iTXt：结构体未被修改时与原 chunk 逐字节一致
+		// uncompressed iTXt: identical to the original chunk byte for byte
+		// when the struct is untouched
 		return rebuildITXT(x, text), nil
 
 	default:
+		// 由用户自定义解析的 chunk 类型没有对应的重新序列化逻辑，保留其原始数据
 		// a custom chunk type parsed by the user has no re-serializer here,
 		// keep its original raw data
 		return c.data, nil
 	}
 }
 
-// rebuildITXT serializes an ITXT struct back into the iTXt data area.
+// rebuildITXT 把 ITXT 结构体序列化回 iTXt 数据区：关键词、0x00、压缩标志、
+// 压缩方法、0x00、语言标签、0x00、翻译关键词、0x00、文本。
+//
+// rebuildITXT serializes an ITXT struct back into the iTXt data area:
+// keyword, 0x00, compression flag, compression method, 0x00, language tag,
+// 0x00, translated keyword, 0x00, text.
 func rebuildITXT(x *ITXT, text []byte) []byte {
 	out := make([]byte, 0, len(x.Keyword)+len(x.LanguageTag)+len(x.TranslatedKeyword)+len(text)+7)
 	out = append(out, x.Keyword...)
@@ -349,6 +390,8 @@ func rebuildITXT(x *ITXT, text []byte) []byte {
 	return out
 }
 
+// MarshalBytes 以字节切片的形式返回当前状态的 PNG 流，细节见 WriteTo。
+//
 // MarshalBytes returns the png stream of the current state as a byte slice,
 // see WriteTo for the details.
 func (p *Png) MarshalBytes() ([]byte, error) {
