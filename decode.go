@@ -183,7 +183,7 @@ var adam7Passes = []adam7Pass{
 // skipped when its increments yield no pixel of the image, in which case the
 // result is 0.
 func adam7PassSize(width, height int, ps adam7Pass) (pw, ph int) {
-	return (width-ps.xOff+ps.dx-1)/ps.dx, (height-ps.yOff+ps.dy-1)/ps.dy
+	return (width - ps.xOff + ps.dx - 1) / ps.dx, (height - ps.yOff + ps.dy - 1) / ps.dy
 }
 
 // adam7Size 返回 Adam7 隔行图像全部七个 pass 的扫描线解压后共有的字节数，
@@ -606,9 +606,9 @@ func (p *Png) rowsToImage(rows [][]byte, width, height, channels int) (image.Ima
 				for x := 0; x < width; x++ {
 					o := base + x*8
 					g := row[x*4 : x*4+2]
-					copy(img.Pix[o:o+2], g)     // R
-					copy(img.Pix[o+2:o+4], g)   // G
-					copy(img.Pix[o+4:o+6], g)   // B
+					copy(img.Pix[o:o+2], g)                  // R
+					copy(img.Pix[o+2:o+4], g)                // G
+					copy(img.Pix[o+4:o+6], g)                // B
 					copy(img.Pix[o+6:o+8], row[x*4+2:x*4+4]) // A
 				}
 			}
