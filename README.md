@@ -21,8 +21,9 @@ identical** — plus a full image encoder with filter/compression control.
   chunks are re-serialized (zTXt/iCCP stay compressed-byte-identical unless
   their payload changed) and every CRC is recomputed
 - encode standard library images with the five-filter adaptive heuristic,
-  optional Adam7 interlace, any zlib level and free ancillary chunk injection
-  (e.g. inject uncompressed XMP by hand)
+  optional Adam7 interlace, any zlib level, **grayscale bit depths 1/2/4/8/16**
+  (`Encoder.BitDepth`) and free ancillary chunk injection (e.g. inject
+  uncompressed XMP by hand)
 
 [PNG (Portable Network Graphics) Specification](https://www.w3.org/TR/PNG-Chunks.html)
 
@@ -164,6 +165,17 @@ and import it:
 		simple_png.RawChunk{Name: simple_png.PHYSChunk, Data: phys},
 		simple_png.RawChunk{Name: name, Data: payload},
 	); err != nil {
+		panic(err)
+	}
+
+	// grayscale at an explicit bit depth (1, 2, 4, 8 or 16); samples must
+	// already fit the depth (no scaling), 16-bit needs *image.Gray16, and
+	// Adam7 works for sub-byte depths too
+	gray := image.NewGray(image.Rect(0, 0, w, h))
+	for i := range gray.Pix {
+		gray.Pix[i] = byte(i % 16) // values 0..15 for BitDepth 4
+	}
+	if _, err = (&simple_png.Encoder{BitDepth: 4}).Encode(gray, &buf); err != nil {
 		panic(err)
 	}
 

@@ -18,7 +18,8 @@
 - 回写：解析过程中未被修改的 chunk 原样复制，修改过的 chunk 重新序列化
   （zTXt/iCCP 未改载荷时保持压缩后的逐字节一致），所有 CRC 重新计算
 - 编码标准库图像：五滤波自适应启发式、可选 Adam7 交错、任意 zlib 等级、
-  自由注入附加 chunk（如手工注入未压缩 XMP）
+  **灰度位深 1/2/4/8/16**（`Encoder.BitDepth`）、自由注入附加 chunk（如手工
+  注入未压缩 XMP）
 
 [PNG (Portable Network Graphics) 规范](https://www.w3.org/TR/PNG-Chunks.html)
 
@@ -158,6 +159,16 @@ go get github.com/knoweather/simple-png
 		simple_png.RawChunk{Name: simple_png.PHYSChunk, Data: phys},
 		simple_png.RawChunk{Name: name, Data: payload},
 	); err != nil {
+		panic(err)
+	}
+
+	// 指定灰度位深编码（1、2、4、8 或 16）：样本必须已经落在该位深内
+	// （不做缩放），16 位需要 *image.Gray16；Adam7 同样支持子字节位深
+	gray := image.NewGray(image.Rect(0, 0, w, h))
+	for i := range gray.Pix {
+		gray.Pix[i] = byte(i % 16) // BitDepth 4 时取值 0..15
+	}
+	if _, err = (&simple_png.Encoder{BitDepth: 4}).Encode(gray, &buf); err != nil {
 		panic(err)
 	}
 

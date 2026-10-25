@@ -11,23 +11,38 @@ import (
 	"github.com/pkg/errors"
 )
 
+// CompressionDefault 是 Encoder.CompressionLevel 的零值，表示使用 zlib
+// 默认压缩级别（6）。
+//
 // CompressionDefault is the zero value of Encoder.CompressionLevel and means
 // the zlib default compression level (6).
 const CompressionDefault = 0
 
+// CompressionNone 把 zlib 压缩器切换到「仅霍夫曼」模式：仍然无损、速度最快，
+// 但输出体积最大。
+//
 // CompressionNone switches the zlib compressor to "huffman only" mode: still
 // lossless, the fastest level, but with the biggest output size.
 const CompressionNone = -2
 
+// FilterStrategy 选择编码时如何为扫描行挑选滤波器。
+//
 // FilterStrategy selects how scanline filters are chosen while encoding.
 type FilterStrategy uint8
 
 const (
+	// FilterHeuristic 对每条扫描行从五种 PNG 滤波器中挑出最便宜的一种，
+	// 采用经典的「绝对差值之和最小」启发式（规范建议的 adaptive filtering）。
+	// 这是零值：通常能给出最好的压缩率。
+	//
 	// FilterHeuristic picks the cheapest of the five png filter types per
 	// scanline with the classic "minimum sum of absolute differences"
 	// heuristic (the "adaptive filtering" recommendation of the spec). This
 	// is the zero value: it normally gives the best compression.
 	FilterHeuristic FilterStrategy = iota
+	// FilterNone 以不滤波方式写出每条扫描行（仅滤波器类型 0），编码最快但
+	// 压缩效果最差。
+	//
 	// FilterNone writes every scanline unfiltered (filter type 0 only),
 	// which is the fastest to encode but compresses worst.
 	FilterNone
@@ -54,8 +69,26 @@ type Encoder struct {
 	// Interlace writes the scanlines as seven Adam7 interlacing passes
 	// (progressive rendering on every decoder), default is non-interlaced.
 	Interlace bool
+	// BitDepth selects the grayscale bit depth to write: 1, 2, 4, 8 or 16.
+	// The zero value keeps the source's natural depth (*image.Gray → 8,
+	// *image.Gray16 → 16). A non-zero value requires a grayscale source and
+	// the samples must already fit that depth — no scaling is applied, so a
+	// 4-bit image cannot be produced from 8-bit values above 15.
+	//
+	// BitDepth 指定写出的灰度位深：1、2、4、8 或 16。零值沿用源图像的自然
+	// 位深（*image.Gray → 8，*image.Gray16 → 16）。非零值要求灰度源，且样本
+	// 必须已经落在该位深范围内——不做缩放，因此不能用大于 15 的 8 位样本
+	// 生成 4 位图像。
+	BitDepth uint8
 }
 
+// Encode 把 img 编码为 PNG 流写入 w，返回写入的字节数和错误。可变参数定义了
+// 写在 IHDR 之后（调色板图像的内部 PLTE/tRNS 之后）、第一个 IDAT 之前的附属块，
+// 例如用 NewITXTChunk 构造的 XMP 元数据或原始 pHYs 块。其 CRC 字段会被忽略，
+// 写出时重新计算。IHDR、IDAT、IEND、PLTE 和 tRNS 不能作为附加块传入
+// （PLTE/tRNS 会与调色板图像自身的块冲突；此类需求请用 ReplaceImage 复用
+// 已解析文件的块）。
+//
 // Encode encodes img as a png stream into w and returns the number of bytes
 // written and an error. The extra arguments define ancillary chunks written
 // after IHDR (and after the internal PLTE/tRNS of a palette image) and
@@ -65,7 +98,15 @@ type Encoder struct {
 // chunk (PLTE/tRNS would collide with the ones of a palette image, use the
 // chunks of an already parsed file through ReplaceImage instead).
 func (e *Encoder) Encode(img image.Image, w io.Writer, extra ...RawChunk) (int64, error) {
-	enc, err := encodeRows(img)
+	var (
+		enc *encodedImage
+		err error
+	)
+	if e.BitDepth != 0 {
+		enc, err = encodeGrayRows(img, e.BitDepth)
+	} else {
+		enc, err = encodeRows(img)
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -85,11 +126,21 @@ func (e *Encoder) Encode(img image.Image, w io.Writer, extra ...RawChunk) (int64
 	return cw.n, nil
 }
 
+// Encode 用默认编码器设置（滤波启发式与默认 zlib 压缩）把 img 编码为 PNG 流，
+// 细节见 Encoder。
+//
 // Encode encodes img as a png stream with default encoder settings (filter
 // heuristic and default zlib compression), see Encoder for the details.
 func Encode(img image.Image, w io.Writer, extra ...RawChunk) (int64, error) {
 	return (&Encoder{}).Encode(img, w, extra...)
 }
+
+// ReplaceImage 重新编码 img 的像素并替换进已解析的 PNG，保留其余所有块
+// （tEXt、iTXt/XMP、tIME、原始块等元数据）及其在流中的位置。新图像必须与文件的
+// 颜色类型和位深一致（尺寸不限）：IHDR 和所报告的图像尺寸会被更新。用它可在
+// 不丢失元数据的前提下替换现有文件的像素。整个操作在内部写锁下执行，因此可与
+// 同一实例的其他编辑方法及读方法并发调用。
+//
 // ReplaceImage re-encodes the pixels of img and swaps them into an already
 // parsed png, keeping every other chunk (metadata like tEXt, iTXt/XMP,
 // tIME, raw chunks...) and its position in the stream untouched. The new
@@ -105,7 +156,18 @@ func (p *Png) ReplaceImage(img image.Image) error {
 	if p.IHDR == nil {
 		return errors.New("png is not parsed")
 	}
-	enc, err := encodeRows(img)
+	var (
+		enc *encodedImage
+		err error
+	)
+	// Grayscale files keep their declared depth: ReplaceImage must be able to
+	// replace the pixels of a 1/2/4-bit image instead of silently re-encoding
+	// it at 8 bits.
+	if p.IHDR.ColorType == 0 {
+		enc, err = encodeGrayRows(img, p.IHDR.BitDepth)
+	} else {
+		enc, err = encodeRows(img)
+	}
 	if err != nil {
 		return err
 	}
@@ -124,6 +186,7 @@ func (p *Png) ReplaceImage(img image.Image) error {
 			idatData = append(idatData, part.data)
 		}
 	}
+	// 更新 IHDR 各值与 IDAT 结构体，之后 WriteTo 会从结构体重新序列化它们
 	// update the IHDR values and the IDAT structs, WriteTo re-serializes
 	// them from the structs afterwards
 	p.IHDR.Width, p.IHDR.Height = uint32(enc.width), uint32(enc.height)
@@ -134,6 +197,8 @@ func (p *Png) ReplaceImage(img image.Image) error {
 	for i, d := range idatData {
 		p.IDATs[i] = &IDAT{Length: uint32(len(d)), ChunkTypeCode: string(IDATChunk), Data: d}
 	}
+	// 重建原始顺序列表：除 IDAT 外全部保留，新 IDAT 块占据第一个 IDAT 的
+	// 位置（其余旧 IDAT 位置被丢弃）
 	// rebuild the original order list: everything except IDAT stays, the
 	// new IDAT chunks take the position of the first IDAT (all further old
 	// IDAT positions are dropped)
@@ -303,6 +368,80 @@ func encodeRows(img image.Image) (*encodedImage, error) {
 			enc.rows[y] = row
 		}
 		return enc, nil
+	}
+}
+
+// encodeGrayRows converts a grayscale image to the requested bit depth. The
+// source must be *image.Gray or *image.Gray16; samples are never rescaled, so
+// a value that does not fit the requested depth is an error (fail-loud instead
+// of silently truncating image data).
+//
+// encodeGrayRows 把灰度图像转换为指定位深。源必须是 *image.Gray 或
+// *image.Gray16；样本绝不缩放，超出指定位深的样本直接报错（fail-loud，
+// 不静默截断图像数据）。
+func encodeGrayRows(img image.Image, depth uint8) (*encodedImage, error) {
+	switch depth {
+	case 1, 2, 4, 8, 16:
+	default:
+		return nil, errors.Errorf("unsupported grayscale bit depth %d (want 1, 2, 4, 8 or 16)", depth)
+	}
+	bounds := img.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	if width <= 0 || height <= 0 {
+		return nil, errors.New("cannot encode an image with empty bounds")
+	}
+	enc := &encodedImage{width: width, height: height, channels: 1, bitDepth: depth, colorType: 0}
+
+	switch src := img.(type) {
+	case *image.Gray:
+		if depth == 16 {
+			return nil, errors.New("grayscale bit depth 16 requires *image.Gray16, not *image.Gray")
+		}
+		if depth == 8 {
+			enc.rows = scanRows(src.Pix, src.Stride, bounds, 1, width, height)
+			return enc, nil
+		}
+		mask := uint16(1)<<depth - 1
+		stride := (width*int(depth) + 7) / 8
+		enc.rows = make([][]byte, height)
+		for y := 0; y < height; y++ {
+			row := make([]byte, stride)
+			first := (bounds.Min.Y+y)*src.Stride + bounds.Min.X
+			pix := src.Pix[first : first+width]
+			for x, v := range pix {
+				if uint16(v) > mask {
+					return nil, errors.Errorf("gray sample %d at (%d,%d) does not fit bit depth %d", v, x, y, depth)
+				}
+				writeSample(row, int(depth), x, uint16(v))
+			}
+			enc.rows[y] = row
+		}
+		return enc, nil
+
+	case *image.Gray16:
+		if depth == 16 {
+			enc.rows = scanRows(src.Pix, src.Stride, bounds, 2, width, height)
+			return enc, nil
+		}
+		mask := uint16(1)<<depth - 1
+		stride := (width*int(depth) + 7) / 8
+		enc.rows = make([][]byte, height)
+		for y := 0; y < height; y++ {
+			row := make([]byte, stride)
+			first := (bounds.Min.Y+y)*src.Stride + bounds.Min.X*2
+			for x := 0; x < width; x++ {
+				v := binary.BigEndian.Uint16(src.Pix[first+x*2:])
+				if v > mask {
+					return nil, errors.Errorf("gray sample %d at (%d,%d) does not fit bit depth %d", v, x, y, depth)
+				}
+				writeSample(row, int(depth), x, v)
+			}
+			enc.rows[y] = row
+		}
+		return enc, nil
+
+	default:
+		return nil, errors.Errorf("BitDepth requires a grayscale image (*image.Gray or *image.Gray16), got %T", img)
 	}
 }
 
